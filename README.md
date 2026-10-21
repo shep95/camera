@@ -9,6 +9,9 @@ and rendered on your device; nothing leaves it.
 
 ## Run it
 
+**Live:** https://true-vision-camera.vercel.app (deployed from `main` on every push)
+
+
 ```bash
 npm start          # → http://localhost:7400
 npm test           # unit tests for the engine (Node ≥ 18)
