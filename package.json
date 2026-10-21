@@ -1,0 +1,14 @@
+{
+  "name": "true-vision-camera",
+  "version": "1.0.0",
+  "description": "True Vision Camera — see yourself as others do. A physics-aware, perception-aware computational camera for the desktop browser.",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "keywords": ["camera", "webcam", "webgl", "computational-photography", "true-vision"],
+  "license": "MIT",
+  "engines": { "node": ">=18" }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "True Vision Camera",
+  "short_name": "True Vision",
+  "description": "See yourself as others do.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#100d0a",
+  "theme_color": "#100d0a",
+  "icons": [{ "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
