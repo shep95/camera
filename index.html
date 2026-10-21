@@ -302,6 +302,7 @@
         <label>File prefix <input id="prefix" type="text" value="74" maxlength="16" pattern="[A-Za-z0-9_\-]*"></label>
         <label>Horizontal field of view (°) <input id="hfov" type="number" min="30" max="120" step="1" value="65"></label>
         <label>Lens distortion k1 <input id="k1" type="number" min="-0.3" max="0.3" step="0.005" value="0.04"></label>
+        <label>Photo format <select id="photoFormat"><option value="png">PNG — lossless (large files)</option><option value="jpeg">JPEG 95% — smaller, opens everywhere</option></select></label>
         <label>Performance <select id="perfTier"><option value="auto">Auto — fast and cool (adapts to the device)</option><option value="full">Full — native resolution preview</option><option value="balanced">Balanced — 1080p preview</option><option value="eco">Eco — 720p preview, lighter analysis</option></select></label>
         <label class="chk"><input id="saveRef" type="checkbox"> Also save an unprocessed reference frame</label>
         <label class="chk"><input id="audio" type="checkbox" checked> Record microphone audio with video</label>

@@ -16,7 +16,7 @@ const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'no-referrer',
-  'Permissions-Policy': 'camera=(self), microphone=(self), geolocation=(), payment=(), usb=(), bluetooth=(), interest-cohort=(), browsing-topics=()',
+  'Permissions-Policy': 'camera=(self), microphone=(self), geolocation=(), payment=(), usb=(), interest-cohort=(), browsing-topics=()',
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Resource-Policy': 'same-origin',
   'Cross-Origin-Embedder-Policy': 'require-corp',

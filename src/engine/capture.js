@@ -40,7 +40,7 @@ export function captureBurst(canvas, renderFrame, frames = 6) {
       if (!sized) { sized = true; out.width = canvas.width; out.height = canvas.height; }
       const s = sharpnessOf(sctx, canvas, small.width, small.height);
       if (s > best) { best = s; octx.drawImage(canvas, 0, 0); }
-      if (++taken >= frames) resolve({ canvas: out, sharpness: best, frames: taken });
+      if (++taken >= frames) resolve({ canvas: out, sharpness: best, frames: taken, width: out.width, height: out.height });
       else requestAnimationFrame(step);
     };
     requestAnimationFrame(step);

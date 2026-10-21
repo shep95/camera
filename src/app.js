@@ -23,7 +23,7 @@ const DEFAULTS = {
   focus: { zoom: 4, follow: true, stabilize: true, auto: true, threshold: 0.45 },
   tools: { analyze: false, region: false, particles: false, freq: false },
   freq: { freqRipples: true, freqWaves: true, freqWave: false },
-  region: null, palette: 'none', obsMode: 'session', obsRetention: 7, perfTier: 'auto',
+  region: null, palette: 'none', obsMode: 'session', obsRetention: 7, perfTier: 'auto', photoFormat: 'png',
   hidden: { modes: false, panel: false, rail: false, ambient: false, overlay: false },
 };
 
@@ -58,6 +58,7 @@ function sanitize(raw) {
   if (raw.region && typeof raw.region === 'object') { const r = { x: num(raw.region.x, 0, 1), y: num(raw.region.y, 0, 1), w: num(raw.region.w, 0, 1), h: num(raw.region.h, 0, 1) }; s.region = Object.values(r).every((v) => v != null) ? r : null; }
   s.palette = str(raw.palette, ['none', 'thermal-sim', 'night-sim', 'mono']) ?? 'none';
   if (raw.hidden && typeof raw.hidden === 'object') for (const k of Object.keys(s.hidden)) s.hidden[k] = bool(raw.hidden[k]) ?? false;
+  s.photoFormat = str(raw.photoFormat, ['png', 'jpeg']) ?? 'png';
   s.perfTier = str(raw.perfTier, ['auto', 'full', 'balanced', 'eco']) ?? 'auto';
   s.obsMode = str(raw.obsMode, ['session', 'private']) ?? 'session'; s.obsRetention = num(raw.obsRetention, 1, 30) ?? 7;
   return s;
@@ -121,12 +122,26 @@ async function startCamera() {
   try { await video.play(); } catch { /* autoplay */ }
   await new Promise((r) => (video.readyState >= 2 ? r() : video.addEventListener('loadeddata', r, { once: true })));
   const track = stream.getVideoTracks()[0];
+  await maximizeResolution(track);
   if (track?.getSettings) { const s = track.getSettings(); if (s.deviceId) state.deviceId = s.deviceId; }
   await populateDevices();
   platform.onStream(stream);
   status(null);
   smooth = null; frameCount = 0;
   if (!raf) raf = requestAnimationFrame(loop);
+}
+
+/** Browsers often answer an "ideal" request with a modest stream; ask for the device's real maximum (bounded by the chosen resolution). */
+async function maximizeResolution(track) {
+  if (!track?.getCapabilities || !track.applyConstraints) return;
+  try {
+    const caps = track.getCapabilities(), cur = track.getSettings(); const [w, h] = resDims(state.res);
+    const maxW = Math.min(caps.width?.max || 0, w), maxH = Math.min(caps.height?.max || 0, h);
+    if (maxW > (cur.width || 0) + 64 || maxH > (cur.height || 0) + 64) {
+      await track.applyConstraints({ width: { ideal: maxW }, height: { ideal: maxH }, frameRate: { ideal: 30 } });
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  } catch { /* keep the stream as delivered */ }
 }
 
 async function populateDevices() {
@@ -170,6 +185,7 @@ function loop(t) {
 }
 
 function updateGuide() {
+  if (guideEl.dataset.hold) return; // a capture note is showing
   const adv = distanceAdvice(decision?.distance ?? null, state.distTarget);
   const hasFace = !!(scene?.face && scene.face.conf > 0.15);
   guideEl.textContent = '';
@@ -250,15 +266,38 @@ function updateAuraReport() {
 
 // ---------------------------------------------------------------- capture
 function flashBadge(text) { if (!featureOn(state.features, 'privacy', 'indicator')) return; recBadge.hidden = false; recTime.textContent = text; setTimeout(() => { if (!recorder.active) recBadge.hidden = true; }, 2500); }
+/** Full-resolution still through the ImageCapture API (often higher than the video stream), rendered through the same pipeline. */
+async function captureStill() {
+  if (typeof ImageCapture === 'undefined' || !stream) return null;
+  const track = stream.getVideoTracks()[0]; if (!track || track.readyState !== 'live') return null;
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+  let bmp = null;
+  try {
+    const ic = new ImageCapture(track);
+    const caps = await withTimeout(ic.getPhotoCapabilities(), 1500).catch(() => null);
+    const opts = caps?.imageWidth?.max ? { imageWidth: caps.imageWidth.max, imageHeight: caps.imageHeight?.max } : {};
+    const blob = await withTimeout(ic.takePhoto(opts), 3000);
+    bmp = await withTimeout(createImageBitmap(blob), 3000);
+    if (bmp.width < video.videoWidth) { console.info(`Still ${bmp.width}×${bmp.height} is not larger than the stream; using the burst`); return null; }
+    const p = { ...smooth, aspect: bmp.width / bmp.height };
+    if (Math.abs(p.aspect - video.videoWidth / video.videoHeight) > 0.02) p.faceR = 0; // different framing: skip face-local re-projection
+    renderer.resize(bmp.width, bmp.height); renderer.draw(bmp, p, performance.now() / 1000, true);
+    const out = document.createElement('canvas'); out.width = bmp.width; out.height = bmp.height; out.getContext('2d').drawImage(view, 0, 0);
+    return { canvas: out, frames: 1, width: out.width, height: out.height, source: 'still' };
+  } catch (e) { console.info(`Still capture unavailable (${e.message || e.name}); using the burst`); return null; }
+  finally { bmp?.close?.(); }
+}
+
 async function takePhoto() {
   if (busy || !stream || !featureOn(state.features, 'recording', 'photo')) return;
   busy = true; shutter.disabled = true;
   try {
     const now = performance.now();
-    const burst = await captureBurst(view, () => renderFrame(performance.now(), true), 6);
+    const shot = (await captureStill()) || (await captureBurst(view, () => renderFrame(performance.now(), true), 6));
     flash.classList.remove('go'); void flash.offsetWidth; flash.classList.add('go');
-    const blob = await canvasToBlob(burst.canvas, 'image/png');
-    const name = makeFilename(state.prefix, state.mode, 'png');
+    const jpeg = state.photoFormat === 'jpeg';
+    const blob = await canvasToBlob(shot.canvas, jpeg ? 'image/jpeg' : 'image/png', jpeg ? 0.95 : undefined);
+    const name = makeFilename(state.prefix, state.mode, jpeg ? 'jpg' : 'png');
     saveBlob(blob, name);
     if (lastUrl) URL.revokeObjectURL(lastUrl);
     lastUrl = URL.createObjectURL(blob); lastImg.src = lastUrl; lastImg.hidden = false; lastShot.dataset.name = name;
@@ -267,10 +306,14 @@ async function takePhoto() {
       ref.getContext('2d').drawImage(video, 0, 0);
       saveBlob(await canvasToBlob(ref, 'image/png'), makeFilename(state.prefix, `${state.mode}_reference`, 'png'));
     }
-    console.info(`Saved ${name} (best of ${burst.frames} frames, ${(performance.now() - now).toFixed(0)} ms)`);
+    const info = `Saved ${shot.width}×${shot.height} · ${shot.source === 'still' ? 'full-resolution still' : `best of ${shot.frames} frames`} · ${(blob.size / 1048576).toFixed(1)} MB`;
+    console.info(`${name}: ${info} in ${(performance.now() - now).toFixed(0)} ms`);
+    showNote(info);
   } catch (e) { status(`Could not save the photo: ${e.message}`, { retry: false }); setTimeout(() => status(null), 3000); }
   finally { busy = false; shutter.disabled = false; }
 }
+let noteTimer = 0;
+function showNote(text) { const g = guideEl; g.textContent = ''; const pill = document.createElement('span'); pill.className = 'pill ok'; pill.textContent = text; g.append(pill); g.dataset.hold = '1'; clearTimeout(noteTimer); noteTimer = setTimeout(() => { delete g.dataset.hold; }, 2600); }
 
 let micStream = null, recStarting = false;
 /** Open the microphone once and keep it ready so recording starts instantly and never loses audio. */
@@ -407,6 +450,7 @@ function initUI() {
   document.querySelectorAll('[data-hide]').forEach((b) => b.addEventListener('click', () => { state.hidden[b.dataset.hide] = true; applyHidden(); }));
   applyHidden();
   $('perfTier').value = state.perfTier; applyPerf();
+  $('photoFormat').value = state.photoFormat; $('photoFormat').addEventListener('change', (e) => { state.photoFormat = e.target.value === 'jpeg' ? 'jpeg' : 'png'; save(); });
   $('perfTier').addEventListener('change', (e) => { state.perfTier = e.target.value; save(); applyPerf(); });
 }
 

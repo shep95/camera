@@ -32,6 +32,12 @@ After the first visit the service worker caches the app, so it keeps working wit
 | frozen expressions | the shutter captures a 6-frame burst and keeps the sharpest (Laplacian variance) |
 | lighting mismatch | exposure targeted on the face, highlight protection, gentle highlight shoulder, filmic tone only when asked |
 
+Stills are captured at the camera's full photo resolution through the ImageCapture API where the
+browser offers it (falling back to a six-frame burst from the stream), rendered with 16-tap bicubic
+sampling so the lens-correction stage does not soften detail, and the stream itself is pushed to the
+device's maximum resolution. A note under the viewfinder confirms the saved size after each shot.
+PNG (lossless) or JPEG 95% can be chosen in Settings.
+
 Captures are saved to the device by the browser with the **`74`** mark at the start of the file
 name: `74_truevision_<mode>_<date>_<time>.png` for photos and `.webm` for video. Optionally, an
 unprocessed reference frame is saved beside each photo for comparison.

@@ -12,7 +12,8 @@ uniform sampler2D u_tex;
 uniform vec2 u_texel;
 uniform float u_mirror, u_k1, u_zoom, u_faceR, u_persp, u_exposure, u_contrast, u_saturation, u_warmth;
 uniform float u_sharpen, u_vignette, u_grain, u_time, u_filmic, u_skin, u_aspect;
-uniform float u_highlightSoft, u_shadowLift, u_bgDesat, u_skinProtect, u_palette;
+uniform float u_highlightSoft, u_shadowLift, u_bgDesat, u_skinProtect, u_palette, u_hq;
+uniform vec2 u_srcTexel;
 uniform vec2 u_face; uniform vec3 u_wb, u_shadowTint;
 
 vec3 toLin(vec3 c){ return pow(max(c,0.0), vec3(2.2)); }
@@ -25,6 +26,16 @@ vec3 rolloff(vec3 x){ // gentle highlight shoulder: linear to 0.8, then exponent
 }
 float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)))*43758.5453); }
 vec3 sampleLin(vec2 p){ return toLin(texture2D(u_tex, clamp(p, 0.0, 1.0)).rgb); }
+// Catmull-Rom bicubic (16 taps) in linear light: keeps edges crisp when the geometry stage
+// resamples at a non-integer scale. Used for still capture, where quality beats speed.
+float cr(float x){ x = abs(x); return x < 1.0 ? 1.5*x*x*x - 2.5*x*x + 1.0 : (x < 2.0 ? -0.5*x*x*x + 2.5*x*x - 4.0*x + 2.0 : 0.0); }
+vec3 sampleHQ(vec2 p){
+  vec2 px = p / u_srcTexel - 0.5; vec2 f = fract(px); vec2 base = (floor(px) - 1.0 + 0.5) * u_srcTexel;
+  vec3 acc = vec3(0.0); float wsum = 0.0;
+  for (int j = 0; j < 4; j++) { float wy = cr(f.y - float(j) + 1.0);
+    for (int i = 0; i < 4; i++) { float w = wy * cr(f.x - float(i) + 1.0); acc += sampleLin(base + vec2(float(i), float(j)) * u_srcTexel) * w; wsum += w; } }
+  return max(acc / wsum, 0.0);
+}
 
 void main(){
   vec2 uv = v_uv;
@@ -40,7 +51,7 @@ void main(){
   cd.x /= u_aspect; uv = cd + 0.5;
 
   // --- texture: unsharp mask (sharpen) or wide blur blend (soften), in linear light
-  vec3 c0 = sampleLin(uv);
+  vec3 c0 = u_hq > 0.5 ? sampleHQ(uv) : sampleLin(uv);
   float rad = u_sharpen >= 0.0 ? 1.0 : 2.5;
   vec2 tx = u_texel * rad;
   vec3 n = sampleLin(uv+vec2(tx.x,0.0)) + sampleLin(uv-vec2(tx.x,0.0)) + sampleLin(uv+vec2(0.0,tx.y)) + sampleLin(uv-vec2(0.0,tx.y));
@@ -97,7 +108,7 @@ void main(){
 }`;
 
 const UNIFORMS = ['u_tex', 'u_texel', 'u_mirror', 'u_k1', 'u_zoom', 'u_faceR', 'u_persp', 'u_exposure', 'u_contrast', 'u_saturation', 'u_warmth',
-  'u_sharpen', 'u_vignette', 'u_grain', 'u_time', 'u_filmic', 'u_skin', 'u_aspect', 'u_highlightSoft', 'u_shadowLift', 'u_bgDesat', 'u_skinProtect', 'u_palette', 'u_face', 'u_wb', 'u_shadowTint'];
+  'u_sharpen', 'u_vignette', 'u_grain', 'u_time', 'u_filmic', 'u_skin', 'u_aspect', 'u_highlightSoft', 'u_shadowLift', 'u_bgDesat', 'u_skinProtect', 'u_palette', 'u_hq', 'u_srcTexel', 'u_face', 'u_wb', 'u_shadowTint'];
 
 export class Renderer {
   constructor(canvas) {
@@ -133,11 +144,12 @@ export class Renderer {
   }
 
   /** Upload the source frame and render it with the given parameters. */
-  draw(source, p, time = 0) {
+  draw(source, p, time = 0, hq = false) {
     const gl = this.gl, u = this.u;
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, source); } catch { return; }
-    gl.uniform2f(u.u_texel, 1 / this.w, 1 / this.h);
+    const sw = source.videoWidth || source.width || this.w, sh = source.videoHeight || source.height || this.h;
+    gl.uniform2f(u.u_texel, 1 / this.w, 1 / this.h); gl.uniform2f(u.u_srcTexel, 1 / sw, 1 / sh); gl.uniform1f(u.u_hq, hq ? 1 : 0);
     gl.uniform1f(u.u_mirror, p.mirror); gl.uniform1f(u.u_k1, p.k1); gl.uniform1f(u.u_zoom, p.zoom);
     gl.uniform2f(u.u_face, p.face[0], p.face[1]); gl.uniform1f(u.u_faceR, p.faceR); gl.uniform1f(u.u_persp, p.persp);
     gl.uniform3f(u.u_wb, p.wb[0], p.wb[1], p.wb[2]); gl.uniform1f(u.u_exposure, p.exposure);
