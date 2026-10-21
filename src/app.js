@@ -5,6 +5,8 @@ import { learnStyle } from './engine/aura.js';
 import { Renderer, smoothParams } from './engine/renderer.js';
 import { captureBurst, saveBlob, canvasToBlob, makeFilename, Recorder } from './engine/capture.js';
 import { GROUPS } from './engine/principles.js';
+import { initPlatform } from './platform.js';
+import { defaultFeatures, sanitizeFeatures, featureOn } from './features.js';
 
 const $ = (id) => document.getElementById(id);
 const STORAGE_KEY = 'truevision.v1';
@@ -16,6 +18,10 @@ const DEFAULTS = {
   aura: { on: false, dir: 'auto', strength: 0.65, skin: true, style: null },
   res: 2160, prefix: '74', hfov: 65, k1: 0.04, saveRef: false, audio: true, mirrorPreviewOnly: false,
   weights: { ...DEFAULT_WEIGHTS }, theme: 'dark', thirds: false, deviceId: null,
+  features: defaultFeatures(),
+  focus: { zoom: 4, follow: true, stabilize: true, auto: true, threshold: 0.45 },
+  tools: { analyze: false, region: false, particles: false },
+  region: null, palette: 'none', obsMode: 'session', obsRetention: 7,
 };
 
 /** Only accept known keys with the expected types from storage (never trust persisted data blindly). */
@@ -42,6 +48,12 @@ function sanitize(raw) {
     const st = raw.aura.style;
     if (st && typeof st === 'object') s.aura.style = { warmth: num(st.warmth, -1, 1) ?? 0, saturation: num(st.saturation, -1, 1) ?? 0, contrast: num(st.contrast, -1, 1) ?? 0, count: num(st.count, 0, 1000) ?? 0 };
   }
+  s.features = sanitizeFeatures(raw.features);
+  if (raw.focus && typeof raw.focus === 'object') { s.focus.zoom = num(raw.focus.zoom, 1.5, 12) ?? 4; for (const k of ['follow', 'stabilize', 'auto']) s.focus[k] = bool(raw.focus[k]) ?? s.focus[k]; s.focus.threshold = num(raw.focus.threshold, 0.1, 0.9) ?? 0.45; }
+  if (raw.tools && typeof raw.tools === 'object') for (const k of ['analyze', 'region', 'particles']) s.tools[k] = bool(raw.tools[k]) ?? false;
+  if (raw.region && typeof raw.region === 'object') { const r = { x: num(raw.region.x, 0, 1), y: num(raw.region.y, 0, 1), w: num(raw.region.w, 0, 1), h: num(raw.region.h, 0, 1) }; s.region = Object.values(r).every((v) => v != null) ? r : null; }
+  s.palette = str(raw.palette, ['none', 'thermal-sim', 'night-sim', 'mono']) ?? 'none';
+  s.obsMode = str(raw.obsMode, ['session', 'private']) ?? 'session'; s.obsRetention = num(raw.obsRetention, 1, 30) ?? 7;
   return s;
 }
 function load() { try { return sanitize(JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null')); } catch { return sanitize(null); } }
@@ -56,16 +68,23 @@ const modeThumbs = [...document.querySelectorAll('[data-thumb]')].map((c) => ({ 
 const presetThumbs = [...document.querySelectorAll('[data-pthumb]')].map((c) => ({ c, ctx: c.getContext('2d'), kind: c.dataset.pthumb }));
 const ambient = $('ambient'); ambient.width = 32; ambient.height = 18; const ambCtx = ambient.getContext('2d');
 
-let renderer, analyzer, stream = null, raf = 0, scene = null, smooth = null, decision = null, frameCount = 0, lastThumb = 0, compare = false, busy = false, lastUrl = null;
+let renderer, analyzer, platform, stream = null, raf = 0, scene = null, smooth = null, decision = null, frameCount = 0, lastThumb = 0, compare = false, busy = false, lastUrl = null;
 const recorder = new Recorder();
 
 // ---------------------------------------------------------------- helpers
 function status(text, opts = {}) {
   if (text == null) { statusEl.hidden = true; return; }
   statusEl.hidden = false; statusEl.textContent = text;
-  if (opts.retry) { const b = document.createElement('button'); b.className = 'ghost'; b.style.marginTop = '14px'; b.textContent = 'Try again'; b.onclick = () => startCamera(); statusEl.append(document.createElement('br'), b); }
+  if (opts.retry) { const b = document.createElement('button'); b.className = 'ghost retry'; b.textContent = 'Try again'; b.onclick = () => startCamera(); statusEl.append(document.createElement('br'), b); }
 }
-function ctl() { return { mode: state.mode, preset: state.preset, focal: state.focal, distTarget: state.distTarget, trueColor: state.trueColor, depth: state.depth, natural: state.natural, capture: state.capture, aura: state.aura }; }
+function ctl() {
+  const f = state.features, proc = featureOn(f, 'processing', 'enabled');
+  return { mode: state.mode, preset: state.preset, focal: state.focal, distTarget: state.distTarget, trueColor: state.trueColor, capture: state.capture,
+    depth: proc && featureOn(f, 'processing', 'depth') && state.depth, natural: !proc || (featureOn(f, 'processing', 'natural') && state.natural),
+    calibration: proc && featureOn(f, 'processing', 'calibration'), exposureColor: proc && featureOn(f, 'processing', 'exposureColor'),
+    lowLight: proc && featureOn(f, 'processing', 'lowLight'), palette: featureOn(f, 'presentation', 'palettes') ? state.palette : 'none',
+    aura: proc && featureOn(f, 'processing', 'aesthetics') ? state.aura : { on: false } };
+}
 function cfg() { return { hfov: state.hfov, k1: state.k1, weights: state.weights }; }
 function resDims(r) { return r >= 2160 ? [3840, 2160] : r >= 1080 ? [1920, 1080] : [1280, 720]; }
 function previewMirror() { return MODES[state.mode].mirror || (state.mirrorPreviewOnly && !recorder.active); }
@@ -95,6 +114,7 @@ async function startCamera() {
   const track = stream.getVideoTracks()[0];
   if (track?.getSettings) { const s = track.getSettings(); if (s.deviceId) state.deviceId = s.deviceId; }
   await populateDevices();
+  platform.onStream(stream);
   status(null);
   smooth = null; frameCount = 0;
   if (!raf) raf = requestAnimationFrame(loop);
@@ -116,7 +136,8 @@ function renderFrame(t, forFile = false) {
   renderer.resize(W, H);
   if (frameCount++ % 3 === 0) scene = analyzer.analyze(video, W / H);
   decision = decide(scene, ctl(), cfg());
-  const target = compare ? neutralParams(decision.params.mirror, W / H) : decision.params;
+  const procOff = !featureOn(state.features, 'processing', 'enabled');
+  const target = compare || procOff ? { ...neutralParams(decision.params.mirror, W / H), palette: decision.params.palette } : decision.params;
   smooth = smoothParams(smooth, target, state.capture === 'video' ? 0.08 : 0.2);
   const p = (!forFile && previewMirror() !== !!smooth.mirror) ? { ...smooth, mirror: previewMirror() ? 1 : 0 } : smooth;
   renderer.draw(video, p, t / 1000);
@@ -129,16 +150,17 @@ function loop(t) {
   if (!renderFrame(t)) return;
   updateGuide();
   if (recorder.active) { const s = Math.floor(recorder.elapsed); recTime.textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; }
+  platform.frame(t);
   if (t - lastThumb > 400) { lastThumb = t; drawThumbs(); drawAmbient(); updateAuraReport(); }
 }
 
 function updateGuide() {
   const adv = distanceAdvice(decision?.distance ?? null, state.distTarget);
   const hasFace = !!(scene?.face && scene.face.conf > 0.15);
-  guideEl.innerHTML = '';
+  guideEl.textContent = '';
   const pill = document.createElement('span'); pill.className = `pill ${adv.cls}`; pill.textContent = adv.text; guideEl.append(pill);
   $('distHint').textContent = hasFace && decision?.distance ? adv.text : 'Recommended for natural proportions';
-  if (state.thirds && hasFace && smooth) {
+  if (state.thirds && hasFace && smooth && featureOn(state.features, 'presentation', 'faceBox')) {
     const r = viewfinder.getBoundingClientRect(); const A = video.videoWidth / video.videoHeight, B = r.width / r.height;
     const dw = A > B ? r.height * A : r.width, dh = A > B ? r.height : r.width / A; const ox = (r.width - dw) / 2, oy = (r.height - dh) / 2;
     const z = smooth.zoom || 1; let fx = 0.5 + (scene.face.x - 0.5) * z, fy = 0.5 + (scene.face.y - 0.5) * z; if (previewMirror()) fx = 1 - fx;
@@ -162,13 +184,30 @@ function drawThumbs() {
 }
 function drawAmbient() {
   drawCover(ambCtx, ambient, previewMirror());
-  if (!scene) return;
-  // Adopt the scene's colour into the UI accent: scene mean, normalised and blended with the house gold.
-  const m = scene.mean, mx = Math.max(m[0], m[1], m[2], 0.05);
-  const gold = state.theme === 'light' ? [155, 123, 47] : [232, 215, 168];
-  const rgb = [0, 1, 2].map((i) => Math.round(gold[i] * 0.55 + (m[i] / mx) * (state.theme === 'light' ? 150 : 235) * 0.45));
-  document.documentElement.style.setProperty('--accent', `rgb(${rgb.join(',')})`);
-  document.documentElement.style.setProperty('--accent-rgb', rgb.join(','));
+  if (!scene || !featureOn(state.features, 'presentation', 'ambient')) return;
+  // Adopt the scene's colour into the UI: one hue + one chroma drive the whole oklch token scale.
+  const [r, g, b] = scene.mean; const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 80; // house gold when the scene is neutral
+  if (d > 0.02) { h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h = (h * 60 + 360) % 360; }
+  const sat = mx > 0 ? d / mx : 0;
+  // keep chroma restrained (calm register): neutral scenes stay gold, saturated scenes tint the UI gently
+  const chroma = 0.06 + Math.min(sat, 0.6) * 0.1;
+  const blend = Math.min(1, sat * 2.5); // how far from gold the hue moves
+  let dh = ((h - 80 + 540) % 360) - 180; const hue = (80 + dh * blend + 360) % 360;
+  hueSmooth = hueSmooth == null ? hue : hueSmooth + (((hue - hueSmooth + 540) % 360) - 180) * 0.1;
+  chromaSmooth = chromaSmooth == null ? chroma : chromaSmooth + (chroma - chromaSmooth) * 0.1;
+  const root = document.documentElement.style;
+  root.setProperty('--h', ((hueSmooth % 360) + 360) % 360);
+  root.setProperty('--c', chromaSmooth.toFixed(3));
+  // sRGB companion for rgba() glows: an approximation of the accent at the current hue
+  const acc = hslToRgb(hueSmooth, state.theme === 'light' ? 0.55 : 0.6, state.theme === 'light' ? 0.36 : 0.74);
+  root.setProperty('--accent-rgb', acc.join(','));
+}
+let hueSmooth = null, chromaSmooth = null;
+function hslToRgb(h, s, l) {
+  const k = (n) => (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+  const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1));
+  return [f(0), f(8), f(4)].map((v) => Math.round(v * 255));
 }
 function updateAuraReport() {
   const el = $('auraReport');
@@ -179,8 +218,9 @@ function updateAuraReport() {
 }
 
 // ---------------------------------------------------------------- capture
+function flashBadge(text) { if (!featureOn(state.features, 'privacy', 'indicator')) return; recBadge.hidden = false; recTime.textContent = text; setTimeout(() => { if (!recorder.active) recBadge.hidden = true; }, 2500); }
 async function takePhoto() {
-  if (busy || !stream) return;
+  if (busy || !stream || !featureOn(state.features, 'recording', 'photo')) return;
   busy = true; shutter.disabled = true;
   try {
     const now = performance.now();
@@ -212,7 +252,7 @@ async function ensureMic() {
 function releaseMic() { micStream?.getTracks().forEach((t) => t.stop()); micStream = null; }
 
 async function toggleRecording() {
-  if (!stream || recStarting) return;
+  if (!stream || recStarting || (!recorder.active && !featureOn(state.features, 'recording', 'video'))) return;
   if (recorder.active) {
     shutter.disabled = true;
     const blob = await recorder.end();
@@ -228,7 +268,7 @@ async function toggleRecording() {
   try {
     const audio = await ensureMic();
     recorder.begin(view, audio, 30);
-    shutter.classList.add('rec'); recBadge.hidden = false; recTime.textContent = '00:00';
+    shutter.classList.add('rec'); recBadge.hidden = !featureOn(state.features, 'privacy', 'indicator'); recTime.textContent = '00:00';
   } catch (e) { status(`Could not start recording: ${e.message}`, { retry: false }); setTimeout(() => status(null), 3000); }
   finally { recStarting = false; shutter.disabled = false; }
 }
@@ -265,7 +305,7 @@ function initUI() {
   document.querySelectorAll('[data-cap]').forEach((b) => b.addEventListener('click', () => setCapture(b.dataset.cap)));
   $('resSel').addEventListener('change', (e) => { state.res = Number(e.target.value); save(); startCamera(); });
   $('themeBtn').addEventListener('click', () => setTheme(state.theme === 'dark' ? 'light' : 'dark'));
-  $('settingsBtn').addEventListener('click', () => $('settingsDlg').showModal());
+  $('settingsBtn').addEventListener('click', () => { platform.renderDeviceCards(); platform.renderFeatureList(); $('settingsDlg').showModal(); });
   $('infoBtn').addEventListener('click', () => { fillReport(); $('infoDlg').showModal(); });
   $('frameBtn').addEventListener('click', () => { state.thirds = !state.thirds; save(); viewfinder.classList.toggle('thirds', state.thirds); $('frameBtn').classList.toggle('on', state.thirds); });
   viewfinder.classList.toggle('thirds', state.thirds); $('frameBtn').classList.toggle('on', state.thirds);
@@ -280,8 +320,8 @@ function initUI() {
   $('focal').addEventListener('input', () => { $('focalHint').textContent = state.focal < 35 ? 'Natural perspective (less distortion)' : state.focal < 60 ? 'Classic portrait rendering' : 'Compressed, flattering telephoto look'; });
   bindRange('dist', 'distTarget', (v) => `${v.toFixed(1)} m`, 'distVal');
   bindRange('trueColor', 'trueColor', (v) => `${Math.round(v * 100)}%`, 'colorVal');
-  bindCheck('depth', () => state.depth, (v) => (state.depth = v));
-  bindCheck('natural', () => state.natural, (v) => (state.natural = v));
+  bindCheck('depth', () => state.depth, (v) => { state.depth = v; state.features.processing.depth = v; });
+  bindCheck('natural', () => state.natural, (v) => { state.natural = v; state.features.processing.natural = v; });
 
   // Adaptive Aura
   const auraBody = $('auraBody');
@@ -306,8 +346,8 @@ function initUI() {
   $('prefix').value = state.prefix; $('prefix').addEventListener('input', (e) => { state.prefix = e.target.value.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 16) || '74'; save(); });
   $('hfov').value = state.hfov; $('hfov').addEventListener('change', (e) => { state.hfov = clamp(Number(e.target.value) || 65, 30, 120); e.target.value = state.hfov; save(); });
   $('k1').value = state.k1; $('k1').addEventListener('change', (e) => { state.k1 = clamp(Number(e.target.value) || 0, -0.3, 0.3); e.target.value = state.k1; save(); });
-  bindCheck('saveRef', () => state.saveRef, (v) => (state.saveRef = v));
-  bindCheck('audio', () => state.audio, (v) => { state.audio = v; if (v && state.capture === 'video') ensureMic(); else releaseMic(); });
+  bindCheck('saveRef', () => state.saveRef, (v) => { state.saveRef = v; state.features.recording.referenceFrames = v; });
+  bindCheck('audio', () => state.audio, (v) => { state.audio = v; state.features.recording.audio = v; if (v && state.capture === 'video') ensureMic(); else releaseMic(); });
   bindCheck('mirrorPreviewOnly', () => state.mirrorPreviewOnly, (v) => (state.mirrorPreviewOnly = v));
   for (const [id, key] of [['wg', 'geometry'], ['wp', 'perception'], ['wq', 'quality'], ['wa', 'artistic']]) {
     const el = $(id), lab = $(id + 'Val'); el.value = state.weights[key]; lab.textContent = `${Math.round(state.weights[key] * 100)}%`;
@@ -365,6 +405,8 @@ function fillReport() {
   try { renderer = new Renderer(view); } catch (e) { return status(`${e.message}\nTrue Vision needs WebGL to run its rendering pipeline.`); }
   analyzer = new SceneAnalyzer();
   initUI();
+  platform = initPlatform({ state, save, video, view, viewfinder, status, flashBadge, getSmooth: () => smooth, getScene: () => scene, previewMirror, getStream: () => stream });
+  platform.applyFeatures();
   if (!window.isSecureContext) return status('Camera access needs a secure context.\nOpen this app over https:// or at http://localhost.');
   startCamera();
   // Offline support: all processing is local, so once cached the app needs no network at all.

@@ -12,7 +12,7 @@ uniform sampler2D u_tex;
 uniform vec2 u_texel;
 uniform float u_mirror, u_k1, u_zoom, u_faceR, u_persp, u_exposure, u_contrast, u_saturation, u_warmth;
 uniform float u_sharpen, u_vignette, u_grain, u_time, u_filmic, u_skin, u_aspect;
-uniform float u_highlightSoft, u_shadowLift, u_bgDesat, u_skinProtect;
+uniform float u_highlightSoft, u_shadowLift, u_bgDesat, u_skinProtect, u_palette;
 uniform vec2 u_face; uniform vec3 u_wb, u_shadowTint;
 
 vec3 toLin(vec3 c){ return pow(max(c,0.0), vec3(2.2)); }
@@ -85,11 +85,19 @@ void main(){
   vec2 vc = (v_uv - 0.5); vc.x *= u_aspect;
   s *= 1.0 - u_vignette * smoothstep(0.45, 1.3, length(vc));
   s += (hash(gl_FragCoord.xy + fract(u_time)) - 0.5) * u_grain;
+  // simulated visualization palettes (presentation only; labelled in the UI, never a measurement)
+  if (u_palette > 0.5) {
+    float v = clamp(luma(s), 0.0, 1.0);
+    if (u_palette < 1.5) { // ironbow-style: black → purple → red → orange → yellow → white
+      s = vec3(smoothstep(0.0,0.5,v)*1.1, smoothstep(0.35,0.85,v), smoothstep(0.0,0.2,v)*(1.0-smoothstep(0.2,0.55,v)) + smoothstep(0.8,1.0,v));
+    } else if (u_palette < 2.5) { s = vec3(v*0.25, v, v*0.35); } // night-style green mono
+    else { s = vec3(v); } // mono
+  }
   gl_FragColor = vec4(clamp(s, 0.0, 1.0), 1.0);
 }`;
 
 const UNIFORMS = ['u_tex', 'u_texel', 'u_mirror', 'u_k1', 'u_zoom', 'u_faceR', 'u_persp', 'u_exposure', 'u_contrast', 'u_saturation', 'u_warmth',
-  'u_sharpen', 'u_vignette', 'u_grain', 'u_time', 'u_filmic', 'u_skin', 'u_aspect', 'u_highlightSoft', 'u_shadowLift', 'u_bgDesat', 'u_skinProtect', 'u_face', 'u_wb', 'u_shadowTint'];
+  'u_sharpen', 'u_vignette', 'u_grain', 'u_time', 'u_filmic', 'u_skin', 'u_aspect', 'u_highlightSoft', 'u_shadowLift', 'u_bgDesat', 'u_skinProtect', 'u_palette', 'u_face', 'u_wb', 'u_shadowTint'];
 
 export class Renderer {
   constructor(canvas) {
@@ -137,7 +145,7 @@ export class Renderer {
     gl.uniform1f(u.u_sharpen, p.sharpen); gl.uniform1f(u.u_vignette, p.vignette); gl.uniform1f(u.u_grain, p.grain);
     gl.uniform1f(u.u_time, time); gl.uniform1f(u.u_filmic, p.filmic); gl.uniform1f(u.u_skin, p.skin); gl.uniform1f(u.u_aspect, p.aspect);
     gl.uniform1f(u.u_highlightSoft, p.highlightSoft); gl.uniform1f(u.u_shadowLift, p.shadowLift);
-    gl.uniform1f(u.u_bgDesat, p.bgDesat); gl.uniform1f(u.u_skinProtect, p.skinProtect);
+    gl.uniform1f(u.u_bgDesat, p.bgDesat); gl.uniform1f(u.u_skinProtect, p.skinProtect); gl.uniform1f(u.u_palette, p.palette || 0);
     gl.uniform3f(u.u_shadowTint, p.shadowTint[0], p.shadowTint[1], p.shadowTint[2]);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
@@ -148,7 +156,7 @@ export function smoothParams(cur, target, a) {
   if (!cur) return { ...target, face: target.face.slice(), wb: target.wb.slice(), shadowTint: target.shadowTint.slice() };
   for (const k in target) {
     const t = target[k];
-    if (typeof t === 'number') cur[k] = k === 'mirror' || k === 'skinProtect' ? t : cur[k] + (t - cur[k]) * a;
+    if (typeof t === 'number') cur[k] = k === 'mirror' || k === 'skinProtect' || k === 'palette' ? t : cur[k] + (t - cur[k]) * a;
     else if (Array.isArray(t)) { for (let i = 0; i < t.length; i++) cur[k][i] += (t[i] - cur[k][i]) * a; }
   }
   return cur;

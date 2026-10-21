@@ -25,7 +25,7 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 /** Neutral parameters: what the renderer does when everything is switched off (only orientation). */
 export function neutralParams(mirror, aspect) {
   return { mirror: mirror ? 1 : 0, k1: 0, zoom: 1, face: [0.5, 0.5], faceR: 0, persp: 0, wb: [1, 1, 1], exposure: 1, contrast: 1, saturation: 1, warmth: 0,
-    sharpen: 0, vignette: 0, grain: 0, filmic: 0, skin: 0, aspect, highlightSoft: 0, shadowLift: 0, shadowTint: [0, 0, 0], bgDesat: 0, skinProtect: 1 };
+    sharpen: 0, vignette: 0, grain: 0, filmic: 0, skin: 0, aspect, highlightSoft: 0, shadowLift: 0, shadowTint: [0, 0, 0], bgDesat: 0, skinProtect: 1, palette: 0 };
 }
 
 /**
@@ -46,7 +46,8 @@ export function decide(scene, ctl, cfg) {
 
   // --- Geometry model (16–30, 101–105) ---------------------------------------------------------
   const focal = clamp(ctl.focal || 24, 18, 85);
-  const k1 = (cfg.k1 ?? 0.04) * clamp(24 / focal, 0.4, 1.3) * clamp(wg / 0.4, 0.5, 1.5);
+  const calib = ctl.calibration !== false, expo = ctl.exposureColor !== false;
+  const k1 = calib ? (cfg.k1 ?? 0.04) * clamp(24 / focal, 0.4, 1.3) * clamp(wg / 0.4, 0.5, 1.5) : 0;
   const rmax2 = 0.25 * (aspect * aspect + 1);
   p.k1 = k1;
   const framingZoom = Math.max(1, 1 + (focal - 24) / 200);
@@ -59,7 +60,7 @@ export function decide(scene, ctl, cfg) {
     distance = estimateDistance(scene.face.w, cfg.hfov || 65);
     p.face = [scene.face.x, scene.face.y];
     p.faceR = Math.max(scene.face.w * aspect, scene.face.h) * 0.78;
-    if (ctl.depth && distance) {
+    if (ctl.depth && calib && distance) {
       // Close viewpoints exaggerate the nose and shrink the ears (perspective foreshortening).
       // Re-project toward a natural observer distance. Mild, local, and reversible.
       const exaggeration = Math.max(0, 1 / distance - 1 / NATURAL_VIEW_DISTANCE);
@@ -83,13 +84,15 @@ export function decide(scene, ctl, cfg) {
     // gain amplifies shot and read noise; the quality weight says how much that matters
     const noise = clamp(scene.noise, 0, 1);
     if (e > 1) e = 1 + (e - 1) * (1 - 0.6 * noise * clamp(wq / 0.2, 0.5, 1.5));
+    if (!expo) e = 1;
     p.exposure = e * (preset.exposure || 1);
+    if (ctl.lowLight && scene.luma < 0.3) { p.exposure = clamp(p.exposure * (0.35 / Math.max(scene.luma, 0.05)), 1, 2.6); add('Computational low-light', `${p.exposure.toFixed(2)}× gain, denoised (software, not night vision)`, '36–40'); }
     add('Exposure gain', `${p.exposure.toFixed(2)}×`, '31, 36–40, 61–62');
     add('Highlight clipping', `${(scene.clipHi * 100).toFixed(1)}%`, '37');
     add('Noise level', `${(noise * 100).toFixed(0)}%`, '38–40');
 
     // --- Color model (46–60) --------------------------------------------------------------------
-    const tc = clamp(ctl.trueColor ?? 0.9, 0, 1);
+    const tc = expo ? clamp(ctl.trueColor ?? 0.9, 0, 1) : 0;
     p.wb = scene.wb.map((g) => 1 + (g - 1) * tc * 0.85);
     p.skin = tc;
     add('White balance gains', p.wb.map((g) => g.toFixed(2)).join(' / '), '50–52');
@@ -100,6 +103,7 @@ export function decide(scene, ctl, cfg) {
     sharpen *= 1 - 0.6 * noise;                               // sharpening would amplify noise
     sharpen += preset.sharpen || 0;
     if (ctl.capture === 'video') sharpen = Math.min(sharpen, 0.6); // temporal stability
+    if (ctl.lowLight && scene.luma < 0.3) sharpen = Math.min(sharpen, -0.25); // denoise instead of sharpen
     p.sharpen = clamp(sharpen, -0.7, 1.2);
     add('Texture', p.sharpen >= 0 ? `+${(p.sharpen * 100).toFixed(0)}% micro-contrast` : `${(p.sharpen * 100).toFixed(0)}% soften`, '41–43, 112');
   }
@@ -128,6 +132,8 @@ export function decide(scene, ctl, cfg) {
     add('Adaptive Aura', `${aura.name} · ${(ctl.aura.strength * 100).toFixed(0)}%`, '56, 59, 98–99');
   }
   p.contrast = clamp(p.contrast, 0.8, 1.3); p.saturation = clamp(p.saturation, 0.6, 1.3); p.warmth = clamp(p.warmth, -0.15, 0.15);
+  p.palette = ['none', 'thermal-sim', 'night-sim', 'mono'].indexOf(ctl.palette || 'none'); if (p.palette < 0) p.palette = 0;
+  if (p.palette) add('Palette', `${ctl.palette} — simulated visualization, not a measurement`, '56, 58');
 
   return { params: p, report, distance, aura, weights: { geometry: wg, perception: wp, quality: wq, artistic: wa } };
 }

@@ -70,6 +70,48 @@
           </label>
         </div>
         <canvas id="view"></canvas>
+        <canvas id="overlay" class="overlay" aria-hidden="true"></canvas>
+        <div id="focusLayer" class="focus-layer"></div>
+        <div id="regionBox" class="region-box" hidden></div>
+        <div class="mode-label" id="modeLabel">visible light · processed</div>
+        <div class="dock" id="dock" role="toolbar" aria-label="Tools">
+          <button class="dock-btn" id="dockFocus" type="button" title="Adaptive focus: auto-open magnified windows on significant moving details (click the image to focus manually)" aria-label="Adaptive focus"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="2"/></svg></button>
+          <button class="dock-btn" id="dockAnalyze" type="button" title="Motion & tracking overlay (non-AI): moving regions, tracks and trajectories" aria-label="Motion overlay"><svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 4 4-7 5 5"/><rect x="3" y="3" width="18" height="18" rx="3"/></svg></button>
+          <button class="dock-btn" id="dockRegion" type="button" title="Region monitoring: drag a rectangle to watch for activity" aria-label="Region monitoring"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" stroke-dasharray="3 3"/></svg></button>
+          <button class="dock-btn" id="dockParticles" type="button" title="Particle view: enhance and trace small bright transient features (a visualization, not a particle count)" aria-label="Particle view"><svg viewBox="0 0 24 24"><circle cx="6" cy="7" r="1.2"/><circle cx="15" cy="5" r="1.2"/><circle cx="18" cy="14" r="1.2"/><circle cx="9" cy="16" r="1.2"/><path d="M6 7l3 9M15 5l3 9"/></svg></button>
+          <button class="dock-btn" id="dockFreq" type="button" title="Frequency seer: optical flicker analysis of the camera signal" aria-label="Frequency seer"><svg viewBox="0 0 24 24"><path d="M2 12c2-6 4-6 6 0s4 6 6 0 4-6 6 0 2 0 2 0"/></svg></button>
+          <button class="dock-btn" id="dockHistory" type="button" title="Observation history" aria-label="Observation history"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg></button>
+          <button class="dock-btn" id="dockWorkspace" type="button" title="Multi-camera workspace" aria-label="Workspace"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg></button>
+          <button class="dock-btn" id="dockScreen" type="button" title="Desktop recording with camera overlay" aria-label="Screen recorder"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></button>
+          <button class="dock-btn" id="dockPalette" type="button" title="Visualization palette (simulated; labelled, never a measurement)" aria-label="Palette"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18c1.5 0 2-1 2-2s-1-2 0-3 3 0 4-1 1-3 1-3a9 9 0 0 0-7-9z"/><circle cx="8" cy="10" r="1"/><circle cx="12" cy="7" r="1"/><circle cx="16" cy="10" r="1"/></svg></button>
+        </div>
+        <section class="drawer" id="drawer" hidden aria-live="polite">
+          <header><strong id="drawerTitle">Panel</strong><button type="button" class="icon-btn small" id="drawerClose" aria-label="Close panel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+          <div class="drawer-body" id="drawerFocus" hidden>
+            <div class="row"><div class="row-h"><span>Digital magnification</span><b id="zoomVal">4.0×</b></div><input type="range" id="zoom" min="1.5" max="12" step="0.5" value="4" aria-label="Magnification"></div>
+            <label class="chk"><input type="checkbox" id="focusFollow" checked> Follow selected target</label>
+            <label class="chk"><input type="checkbox" id="focusStabilize" checked> Stabilize focus view</label>
+            <label class="chk"><input type="checkbox" id="focusAuto" checked> Automatically open focus windows for significant details</label>
+            <div class="row-h cols-2"><span>Attention threshold</span><b id="attnVal">45%</b></div><input type="range" id="attn" min="0.1" max="0.9" step="0.05" value="0.45" aria-label="Attention threshold">
+            <p class="muted">Magnification enlarges captured pixels only. It cannot reveal detail the sensor never recorded. Click anywhere in the image to open a manual focus window.</p>
+            <button type="button" class="ghost sm" id="closeFocusWins">Close all focus windows</button>
+          </div>
+          <div class="drawer-body" id="drawerHistory" hidden>
+            <div class="hist-tools">
+              <select id="obsMode" aria-label="History mode"><option value="session">Session-only memory</option><option value="private">Private application history</option></select>
+              <select id="obsRetention" aria-label="Retention"><option value="1">Keep 1 day</option><option value="7">Keep 7 days</option><option value="30">Keep 30 days</option></select>
+              <button type="button" class="ghost sm" id="obsClear">Delete all</button>
+            </div>
+            <p class="muted" id="obsStats"></p>
+            <ol class="hist-list" id="histList"></ol>
+          </div>
+          <div class="drawer-body" id="drawerFreq" hidden>
+            <div class="freq-states"><span class="tag measured">measured</span> optical flicker of the camera signal · <span class="tag estimated">estimated</span> none · <span class="tag illustrative">illustrative</span> <label class="chk inline"><input type="checkbox" id="freqWave"> wave animation (not a measurement)</label></div>
+            <canvas id="freqCanvas" width="640" height="160"></canvas>
+            <p class="muted" id="freqText">Collecting samples…</p>
+            <p class="muted">External RF / EMF sensor: <b>not connected</b>. A visible-light camera does not measure ambient radio-frequency fields; this panel analyses brightness over time, limited to half the frame rate.</p>
+          </div>
+        </section>
         <div class="guide-box" id="guideBox" hidden></div>
         <div class="guide" id="guide" aria-live="polite"></div>
         <div class="rec-badge" id="recBadge" hidden><span class="dot"></span><span id="recTime">00:00</span></div>
@@ -196,6 +238,53 @@
     </aside>
   </div>
 
+  <section class="overlay-panel" id="workspace" hidden aria-label="Workspace">
+    <header class="op-head">
+      <div><h2>Workspace</h2><p class="muted">Every source is an independent tile on one clock. Drag tiles to reorder; choose which streams to record.</p></div>
+      <button type="button" class="icon-btn" id="wsClose" aria-label="Close workspace"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="op-tools">
+      <select id="wsDevice" aria-label="Camera to add"></select>
+      <button type="button" class="ghost sm" id="wsAddCam">Add camera</button>
+      <button type="button" class="ghost sm" id="wsAddPrimary">Add primary feed</button>
+      <button type="button" class="ghost sm" id="wsAddScreen">Add screen</button>
+      <select id="wsLayout" aria-label="Layout"><option value="2x2">2 × 2</option><option value="1x2">1 × 2</option><option value="1x1">1 × 1</option></select>
+      <select id="wsRecMode" aria-label="Recording mode"><option value="sync">Synchronized recording</option><option value="independent">Independent streams</option><option value="both">Both</option></select>
+      <button type="button" class="primary sm" id="wsRecord">Record</button>
+      <span class="muted" id="wsStatus"></span>
+    </div>
+    <div class="ws-grid" id="wsGrid" data-layout="2x2"></div>
+  </section>
+
+  <section class="overlay-panel" id="screenRec" hidden aria-label="Screen recorder">
+    <header class="op-head">
+      <div><h2>Screen recorder</h2><p class="muted">The desktop is a source like any camera. The camera overlay is a composited layer: its position, size, shape and opacity never alter the camera video.</p></div>
+      <button type="button" class="icon-btn" id="srClose" aria-label="Close screen recorder"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="sr-layout">
+      <div class="sr-preview" id="srPreview"><p class="muted" id="srHint">Select a display, window or tab to begin.</p></div>
+      <div class="sr-controls">
+        <button type="button" class="ghost sm" id="srSelect">Select screen…</button>
+        <label class="chk"><input type="checkbox" id="srOverlay" checked> Camera overlay</label>
+        <div class="row-h cols-1"><span>Overlay shape</span></div>
+        <div class="chips" id="srShape"><button type="button" class="chip on" data-v="rounded">Rounded</button><button type="button" class="chip" data-v="circle">Circle</button><button type="button" class="chip" data-v="square">Square</button></div>
+        <div class="row-h cols-1"><span>Overlay size</span></div>
+        <div class="chips" id="srSize"><button type="button" class="chip" data-v="small">Small</button><button type="button" class="chip on" data-v="medium">Medium</button><button type="button" class="chip" data-v="large">Large</button></div>
+        <div class="row-h cols-2"><span>Overlay opacity</span><b id="srOpVal">100%</b></div>
+        <input type="range" id="srOpacity" min="0.2" max="1" step="0.05" value="1" aria-label="Overlay opacity">
+        <p class="muted">Drag the overlay in the preview; it snaps to the corners.</p>
+        <label class="chk"><input type="checkbox" id="srMic" checked> Microphone</label>
+        <label class="chk"><input type="checkbox" id="srSys" checked> System audio (when the browser offers it)</label>
+        <p class="muted">Cursor highlighting and keystroke visualization are not available to a web page (the browser does not expose them during capture).</p>
+        <div class="sr-actions">
+          <button type="button" class="primary sm" id="srRecord" disabled>Record</button>
+          <button type="button" class="ghost sm" id="srPause" disabled>Pause</button>
+          <span id="srTime" class="muted">00:00</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <dialog id="settingsDlg" class="dlg">
     <form method="dialog">
       <h2>Settings</h2>
@@ -208,6 +297,12 @@
         <label class="chk"><input id="audio" type="checkbox" checked> Record microphone audio with video</label>
         <label class="chk"><input id="mirrorPreviewOnly" type="checkbox"> Mirror the live preview only (file stays true)</label>
       </div>
+      <h3>Devices</h3>
+      <p class="muted">Capability manifests separate what a driver reports from what has been verified by opening the device. Modality is guessed from the device name only.</p>
+      <div id="deviceCards" class="device-cards"></div>
+      <h3>Features by domain</h3>
+      <p class="muted">Every feature has its own switch. Switching a domain off disables all of its features.</p>
+      <div id="featureList" class="feature-list"></div>
       <h3>Adaptive priorities</h3>
       <p class="muted">Weights for the decision engine. They resolve conflicts between models; they are not filters.</p>
       <div class="dlg-grid">
