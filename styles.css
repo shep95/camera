@@ -84,12 +84,17 @@ hr { border: 0; border-top: 1px solid var(--glass-border); margin: var(--s4) 0; 
 svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Adaptive background: a blurred, low-res copy of the live frame (static filter, never animated) */
-#ambient {
+.ambient {
   position: fixed; inset: -12%; width: 124%; height: 124%;
   filter: blur(70px) saturate(1.2) brightness(0.5);
-  z-index: 0; pointer-events: none;
+  z-index: 0; pointer-events: none; opacity: 0;
+  transition: opacity var(--amb-period, 1600ms) linear; /* cross-fade exactly one sampling period */
+  will-change: opacity;
 }
-:root[data-theme="light"] #ambient { filter: blur(70px) saturate(0.85) brightness(1.6) opacity(0.6); }
+.ambient.front { opacity: 1; }
+:root[data-theme="light"] .ambient { filter: blur(70px) saturate(0.85) brightness(1.6) opacity(0.6); }
+:root[data-theme="light"] .ambient.front { opacity: 0.6; }
+body, .panel, .seg, .res select, .dock, .controls, .mode::before { transition-property: background-color, color, box-shadow; transition-duration: var(--amb-period, 1600ms); transition-timing-function: linear; }
 .ambient-veil {
   position: fixed; inset: 0; z-index: 0; pointer-events: none;
   background: radial-gradient(1200px 700px at 60% 45%, rgba(var(--accent-rgb), 0.06), transparent 60%), linear-gradient(180deg, rgba(0,0,0,0.25), rgba(0,0,0,0.55));
@@ -137,7 +142,12 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .mode-text small { display: block; font-size: var(--t-1); color: var(--muted); line-height: 1.35; letter-spacing: 0.01em; }
 
 /* Stage */
-.stage { grid-area: stage; display: grid; grid-template-rows: 1fr 96px; gap: 14px; min-width: 0; }
+.stage { grid-area: stage; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 1fr 96px; gap: 14px; min-width: 0; }
+.viewfinder { grid-column: 1; grid-row: 1; }
+.focus-rail { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; gap: 10px; width: 176px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; animation: dlg-in var(--d-std) var(--e-out); }
+.focus-rail::-webkit-scrollbar { display: none; }
+.focus-rail[hidden] { display: none; }
+.controls { grid-column: 1 / -1; grid-row: 2; }
 .viewfinder { position: relative; border-radius: 20px; overflow: hidden; background: #000; box-shadow: 0 0 0 1px var(--ring), var(--shadow-ambient); min-height: 0; }
 #view { width: 100%; height: 100%; object-fit: cover; display: block; background: #000; }
 /* overlays sit on an arbitrary live background: always on a scrim, never bare text */
@@ -278,10 +288,26 @@ input[type="range"]::-moz-range-thumb { width: 18px; height: 18px; border: 0; bo
 .models p { margin: 4px 0 0; color: var(--muted); }
 
 
+/* ---- Hiding panels: display none AND their drawing loops stop (see app.js) ---- */
+.hide-x { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 4px 8px; border-radius: 999px; align-self: flex-end; }
+.hide-x:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+.modes .hide-x { margin: -56px 0 8px; }
+.panel-head .hide-x { margin-right: 4px; }
+.panel-head { align-items: center; }
+.panel-head > div { flex: 1; }
+body.hide-modes .modes, body.hide-panel .panel, body.hide-rail .focus-rail, body.hide-ambient .ambient, body.hide-ambient .ambient-veil, body.hide-overlay #overlay { display: none !important; }
+body.hide-modes .app { grid-template-columns: minmax(420px, 1fr) 340px; grid-template-areas: "top top" "stage panel"; }
+body.hide-panel .app { grid-template-columns: 300px minmax(420px, 1fr); grid-template-areas: "top top" "modes stage"; }
+body.hide-modes.hide-panel .app { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "stage"; }
+body.hide-ambient { background: var(--bg); }
+body.hide-modes .brand { margin-top: 0; }
+#hideBtn.on { color: var(--accent); }
+@media (max-width: 1240px) { body.hide-modes .app, body.hide-panel .app, body.hide-modes.hide-panel .app { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "stage" "modes" "panel"; } .modes .hide-x { margin: 0; } }
+
 /* ---- Viewfinder overlays, dock, drawer, focus windows ---- */
 .overlay { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
-.focus-layer { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
-.focus-win { position: absolute; width: 176px; pointer-events: auto; border-radius: 18px; overflow: hidden; background: var(--surface-1); box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.55), var(--shadow-ambient); cursor: grab; touch-action: none; }
+.focus-layer { display: none; }
+.focus-win { flex: 0 0 auto; width: 176px; border-radius: 18px; overflow: hidden; background: var(--surface-1); box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.55), var(--shadow-ambient); animation: dlg-in var(--d-std) var(--e-out); }
 .focus-win canvas { display: block; width: 176px; height: 176px; image-rendering: auto; }
 .focus-win[data-state="lost"] { box-shadow: 0 0 0 1px oklch(0.7 0.18 28 / 0.8), var(--shadow-ambient); }
 .focus-win[data-state="predicting"], .focus-win[data-state="reacquiring"] { box-shadow: 0 0 0 1px oklch(0.8 0.12 80 / 0.8), var(--shadow-ambient); }
@@ -326,7 +352,6 @@ label.chk.inline { display: inline-grid; grid-template-columns: auto auto; gap: 
 .tag.measured { background: oklch(0.45 0.12 145 / 0.4); color: oklch(0.9 0.1 145); }
 .tag.estimated { background: oklch(0.5 0.12 80 / 0.4); color: oklch(0.9 0.1 80); }
 .tag.illustrative { background: oklch(0.5 0.1 300 / 0.4); color: oklch(0.9 0.08 300); }
-#freqCanvas { width: 100%; height: 120px; border-radius: 10px; background: var(--surface-1); }
 
 /* ---- Workspace and screen recorder panels ---- */
 .overlay-panel { position: fixed; inset: 0; z-index: 30; background: var(--bg); display: flex; flex-direction: column; padding: 18px; gap: 12px; overflow: auto; animation: dlg-in var(--d-std) var(--e-out); }
@@ -375,6 +400,7 @@ label.chk.inline { display: inline-grid; grid-template-columns: auto auto; gap: 
   .drawer { left: 8px; right: 8px; bottom: 50px; max-height: 70%; }
   .dock { top: 56px; right: 8px; }
   .focus-win { width: 128px; } .focus-win canvas { width: 128px; height: 128px; }
+  .focus-rail { gap: 8px; }
 }
 
 /* Responsive — stacked layout below the three-column breakpoint */
@@ -391,7 +417,10 @@ label.chk.inline { display: inline-grid; grid-template-columns: auto auto; gap: 
   .brand-ring { width: 32px; height: 32px; }
   .brand-text h1 { font-size: 16px; letter-spacing: 0.24em; }
   .brand-text p { font-size: 9px; letter-spacing: 0.18em; }
-  .stage { grid-template-rows: auto auto; gap: 12px; }
+  .stage { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; gap: 12px; }
+  .viewfinder { grid-column: 1; grid-row: 1; }
+  .focus-rail { grid-column: 1; grid-row: 2; width: auto; flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+  .controls { grid-column: 1; grid-row: 3; }
   .viewfinder { aspect-ratio: 4 / 3; max-height: 70dvh; }
   .modes { flex-direction: row; gap: 10px; padding: 4px 0 8px; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
   .modes::-webkit-scrollbar { display: none; }

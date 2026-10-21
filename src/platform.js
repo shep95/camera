@@ -1,6 +1,6 @@
 // Platform layer: device system, optical intelligence, adaptive focus, observation history,
 // frequency seer, multi-camera workspace, screen recorder and the per-feature settings UI.
-import { MotionAnalyzer, Tracker, FlickerAnalyzer } from './engine/vision.js';
+import { MotionAnalyzer, Tracker, FlickerAnalyzer, FlickerField } from './engine/vision.js';
 import { AdaptiveFocus } from './engine/focus.js';
 import { ObservationLog } from './engine/observations.js';
 import { DeviceManager } from './engine/devices.js';
@@ -18,10 +18,13 @@ export function initPlatform(ctx) {
   const F = () => state.features;
   const on = (d, k) => featureOn(F(), d, k);
 
-  const analyzer = new MotionAnalyzer(), tracker = new Tracker(), focus = new AdaptiveFocus(), flicker = new FlickerAnalyzer(128);
+  const analyzer = new MotionAnalyzer(), tracker = new Tracker(), focus = new AdaptiveFocus(), flicker = new FlickerAnalyzer(128), field = new FlickerField(16, 9, 64);
   const obs = new ObservationLog({ mode: state.obsMode, retentionDays: state.obsRetention, maxItems: 200 });
   const devices = new DeviceManager(), screenRec = new ScreenRecorder(), ws = new Workspace();
-  const overlay = $('overlay'), octx = overlay.getContext('2d'), focusLayer = $('focusLayer'), regionBox = $('regionBox'), modeLabel = $('modeLabel');
+  const overlay = $('overlay'), octx = overlay.getContext('2d'), focusRail = $('focusRail'), regionBox = $('regionBox'), modeLabel = $('modeLabel');
+  let fieldLast = 0, freqTextLast = 0;
+  const fcv = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(32, 18) : Object.assign(document.createElement('canvas'), { width: 32, height: 18 });
+  const fctx = fcv.getContext('2d', { willReadFrequently: true });
   let vision = null, tracks = [], lastT = 0, frameN = 0, lastEventClip = 0, regionCooldown = 0, regionDraw = null, drawer = null, particleTrails = [];
   const winEls = new Map();
 
@@ -44,8 +47,10 @@ export function initPlatform(ctx) {
   function frame(t) {
     const dt = lastT ? (t - lastT) / 1000 : 1 / 30; lastT = t; frameN++;
     const intel = on('intelligence', 'enabled') && video.readyState >= 2 && video.videoWidth;
+    const wantFreq = intel && on('intelligence', 'frequency') && (state.tools.freq || drawer === 'freq');
     const wantMotion = intel && (on('intelligence', 'motion') || on('intelligence', 'objects') || on('intelligence', 'particles') || on('intelligence', 'autoFocus') || on('intelligence', 'region'));
-    if (wantMotion && frameN % 2 === 0) {
+    if (wantFreq && frameN % 2 === 0) sampleFrequency(t);
+    if (wantMotion && frameN % ctx.getStride() === 0) {
       vision = analyzer.analyze(video);
       if (!on('processing', 'stabilization')) vision.shift = { dx: 0, dy: 0 };
       if (on('intelligence', 'objects') || on('intelligence', 'autoFocus') || on('intelligence', 'region')) {
@@ -57,7 +62,6 @@ export function initPlatform(ctx) {
         particleTrails.push({ t, pts: vision.particles }); if (particleTrails.length > 12) particleTrails.shift();
       } else particleTrails = [];
       if (on('intelligence', 'region') && state.region) checkRegion(t);
-      if (on('intelligence', 'frequency')) flicker.push(vision.luma, t);
     }
     if (intel && on('intelligence', 'autoFocus')) {
       focus.set({ auto: state.focus.auto, follow: state.focus.follow, stabilize: state.focus.stabilize, zoom: state.focus.zoom, threshold: state.focus.threshold });
@@ -65,9 +69,18 @@ export function initPlatform(ctx) {
       for (const e of events) onFocusEvent(e);
     } else if (focus.windows.length) { focus.closeAll(); }
     drawOverlay(); renderFocusWindows();
-    if (drawer === 'freq' && frameN % 15 === 0) drawSpectrum();
+    if (drawer === 'freq' && t - freqTextLast > 500) { freqTextLast = t; updateFreqText(); }
     if (screenRec.active && frameN % 30 === 0) $('srTime').textContent = fmt(screenRec.elapsed);
     if (ws.recording && frameN % 30 === 0) $('wsStatus').textContent = `Recording ${fmt((performance.now() - ws.recordingSince) / 1000)}`;
+  }
+
+  /** Brightness sampling for the frequency seer: a 32×18 luma grid, independent of the analysis tier. */
+  function sampleFrequency(t) {
+    fctx.drawImage(video, 0, 0, 32, 18); const { data } = fctx.getImageData(0, 0, 32, 18);
+    const L = new Float32Array(32 * 18); let sum = 0;
+    for (let i = 0, p = 0; i < L.length; i++, p += 4) { const y = (0.2126 * data[p] + 0.7152 * data[p + 1] + 0.0722 * data[p + 2]) / 255; L[i] = y; sum += y; }
+    flicker.push(sum / L.length, t); field.push(L, 32, 18, t);
+    if (t - fieldLast > 400) { fieldLast = t; field.compute(); }
   }
 
   function checkRegion(t) {
@@ -87,7 +100,8 @@ export function initPlatform(ctx) {
     const c = coverRect(); const dpr = Math.min(devicePixelRatio || 1, 2); const W = Math.round(c.w * dpr), H = Math.round(c.h * dpr);
     if (overlay.width !== W || overlay.height !== H) { overlay.width = W; overlay.height = H; }
     octx.setTransform(dpr, 0, 0, dpr, 0, 0); octx.clearRect(0, 0, c.w, c.h);
-    if (!on('presentation', 'enabled') || !on('presentation', 'overlays') || !on('intelligence', 'enabled')) return;
+    if (!on('presentation', 'enabled') || !on('presentation', 'overlays') || !on('intelligence', 'enabled') || ctx.isHidden?.('overlay')) return;
+    if (state.tools.freq && on('intelligence', 'frequency')) drawFrequency(c);
     const showTracks = state.tools.analyze && on('intelligence', 'objects');
     if (showTracks) for (const tr of tracks) {
       if (tr.hits < 3) continue;
@@ -113,14 +127,15 @@ export function initPlatform(ctx) {
 
   // ------------------------------------------------------------------ focus windows (presentation layer)
   function renderFocusWindows() {
-    const show = on('presentation', 'enabled') && on('presentation', 'focusWindows');
+    const show = on('presentation', 'enabled') && on('presentation', 'focusWindows') && !ctx.isHidden?.('rail');
     for (const [id, we] of winEls) if (!focus.windows.find((w) => w.id === id) || !show) { we.root.remove(); winEls.delete(id); }
+    focusRail.hidden = !show || focus.windows.length === 0;
     if (!show) return;
-    focus.windows.forEach((w, i) => {
+    focus.windows.forEach((w) => {
       let we = winEls.get(w.id);
-      if (!we) { we = makeWinEl(w, i); winEls.set(w.id, we); focusLayer.append(we.root); }
+      if (!we) { we = makeWinEl(w); winEls.set(w.id, we); focusRail.append(we.root); }
       const r = focus.cropRect(w, video.videoWidth, video.videoHeight);
-      if (w.state !== 'lost' || !we.frozen) {
+      if ((w.state !== 'lost' || !we.frozen) && frameN % 2 === 0) { // the rail refreshes at half rate to stay cool
         we.cctx.save(); if (ctx.previewMirror()) { we.cctx.translate(we.canvas.width, 0); we.cctx.scale(-1, 1); }
         try { we.cctx.drawImage(video, r.sx, r.sy, r.size, r.size, 0, 0, we.canvas.width, we.canvas.height); } catch { /* frame not ready */ }
         we.cctx.restore(); we.frozen = w.state === 'lost';
@@ -129,8 +144,8 @@ export function initPlatform(ctx) {
       we.root.dataset.state = w.state;
     });
   }
-  function makeWinEl(w, i) {
-    const root = el('div', 'focus-win'); const canvas = el('canvas'); canvas.width = 240; canvas.height = 240; const cctx = canvas.getContext('2d');
+  function makeWinEl(w) {
+    const root = el('div', 'focus-win'); const canvas = el('canvas'); canvas.width = 176; canvas.height = 176; const cctx = canvas.getContext('2d');
     const bar = el('div', 'fw-bar'); const label = el('span', 'fw-label', '');
     const pin = el('button', 'fw-btn', '📌'); pin.type = 'button'; pin.title = 'Pin (keep after the target is lost)'; pin.setAttribute('aria-label', 'Pin');
     const zin = el('button', 'fw-btn', '+'); zin.type = 'button'; zin.title = 'Zoom in'; const zout = el('button', 'fw-btn', '−'); zout.type = 'button'; zout.title = 'Zoom out';
@@ -139,12 +154,6 @@ export function initPlatform(ctx) {
     zin.onclick = () => { w.zoom = clamp((w.zoom || focus.opts.zoom) + 1, 1.5, 16); }; zout.onclick = () => { w.zoom = clamp((w.zoom || focus.opts.zoom) - 1, 1.5, 16); };
     close.onclick = () => { focus.close(w.id); };
     bar.append(label, zout, zin, pin, close); root.append(canvas, bar);
-    root.style.left = '14px'; root.style.top = `${60 + (i % 3) * 196}px`;
-    // drag
-    let drag = null;
-    root.addEventListener('pointerdown', (e) => { if (e.target.closest('button')) return; drag = { x: e.clientX, y: e.clientY, l: root.offsetLeft, t: root.offsetTop }; root.setPointerCapture(e.pointerId); });
-    root.addEventListener('pointermove', (e) => { if (!drag) return; root.style.left = `${clamp(drag.l + e.clientX - drag.x, 0, viewfinder.clientWidth - root.offsetWidth)}px`; root.style.top = `${clamp(drag.t + e.clientY - drag.y, 0, viewfinder.clientHeight - root.offsetHeight)}px`; });
-    root.addEventListener('pointerup', () => { drag = null; }); root.addEventListener('pointercancel', () => { drag = null; });
     return { root, canvas, cctx, label, frozen: false };
   }
 
@@ -220,19 +229,54 @@ export function initPlatform(ctx) {
     if (!obs.items.length) list.append(el('li', 'muted', 'No observations yet. Significant moving details, lost targets and region activity appear here.'));
   }
 
-  // frequency drawer
-  const fcv = $('freqCanvas'), fctx = fcv.getContext('2d'); let wavePhase = 0;
-  function drawSpectrum() {
-    const sp = flicker.spectrum(); fctx.clearRect(0, 0, fcv.width, fcv.height);
-    fctx.fillStyle = 'rgba(255,255,255,0.04)'; fctx.fillRect(0, 0, fcv.width, fcv.height);
-    if (!sp) { $('freqText').textContent = 'Collecting samples…'; return; }
-    const max = Math.max(...sp.bins.map((b) => b.mag), 1e-6); const bw = fcv.width / sp.bins.length;
-    sp.bins.forEach((b, i) => { const h = (b.mag / max) * (fcv.height - 30); fctx.fillStyle = b === sp.peak ? '#e8d7a8' : 'rgba(200,220,255,0.7)'; fctx.fillRect(i * bw, fcv.height - 18 - h, Math.max(1, bw - 1), h); });
-    fctx.fillStyle = 'rgba(255,255,255,0.7)'; fctx.font = '11px system-ui, sans-serif'; for (let hz = 0; hz <= sp.nyquist; hz += 5) { const x = (hz / sp.nyquist) * fcv.width; fctx.fillText(`${hz} Hz`, x + 2, fcv.height - 4); }
-    if ($('freqWave').checked) { wavePhase += 0.15; fctx.strokeStyle = 'rgba(232,215,168,0.5)'; fctx.beginPath(); for (let x = 0; x < fcv.width; x++) { const y = fcv.height / 2 + Math.sin(x / 18 + wavePhase) * 20 * (sp.peak.mag / max); x ? fctx.lineTo(x, y) : fctx.moveTo(x, y); } fctx.stroke(); fctx.fillStyle = '#e8d7a8'; fctx.fillText('ILLUSTRATIVE — not a measurement', 8, 14); }
-    const significant = sp.peak.mag > 0.004;
-    $('freqText').textContent = `measured (optical): ${significant ? `dominant brightness oscillation ≈ ${sp.peak.hz.toFixed(1)} Hz` : 'no dominant oscillation above noise'} · sampling ${sp.fps.toFixed(1)} fps → Nyquist ${sp.nyquist.toFixed(1)} Hz · ${sp.samples} samples. Mains flicker (50/60 Hz) aliases at this frame rate; this is not an RF measurement.`;
+  // frequency seer: an overlay on the image, not a graph. Ripples mark where brightness oscillates
+  // (ring rate = measured Hz, colour = frequency); wave lines carry the dominant frequencies
+  // (wavelength and travel speed follow the measured rate). Everything drawn is labelled.
+  const hzColor = (hz, nyq, a = 0.9) => `hsl(${Math.round(35 + 180 * clamp(hz / Math.max(nyq, 1), 0, 1))} 90% 65% / ${a})`;
+  function drawFrequency(c) {
+    const res = field.result; const now = performance.now() / 1000;
+    const cx = octx; cx.save();
+    if ($('freqWave').checked) { // illustrative interference pattern, clearly flagged
+      cx.globalAlpha = 0.18; cx.strokeStyle = 'rgba(232,215,168,1)'; cx.lineWidth = 1;
+      for (let i = 0; i < 14; i++) { cx.beginPath(); for (let x = 0; x <= c.w; x += 8) { const y = (i + 0.5) * c.h / 14 + Math.sin(x / 36 + now * 1.3 + i) * 9 + Math.sin(x / 11 - now * 2.1) * 4; x ? cx.lineTo(x, y) : cx.moveTo(x, y); } cx.stroke(); }
+      cx.globalAlpha = 1; cx.fillStyle = 'rgba(0,0,0,0.55)'; cx.fillRect(c.w - 262, c.h - 34, 250, 18); cx.fillStyle = '#e8d7a8'; cx.font = '11px system-ui, sans-serif'; cx.fillText('ILLUSTRATIVE pattern — not a measurement', c.w - 256, c.h - 21);
+    }
+    if (!res) { cx.restore(); return; }
+    const nyq = res.nyquist;
+    if ($('freqRipples').checked) {
+      const strong = res.cells.filter((e) => e.mag > 0.003 && e.snr > 2.5).sort((a, b) => b.mag - a.mag).slice(0, 24);
+      const maxMag = strong[0]?.mag || 1;
+      for (const e of strong) {
+        const p = uvToScreen((e.c + 0.5) / field.cols, (e.r + 0.5) / field.rows); const R = Math.min(c.w, c.h) * (0.05 + 0.06 * e.mag / maxMag);
+        const cyc = (now * e.hz + e.phase / (2 * Math.PI)) % 1;
+        for (let k = 0; k < 3; k++) { const f = (cyc + k / 3) % 1; const r = f * R; cx.beginPath(); cx.arc(p.x, p.y, r, 0, Math.PI * 2); cx.strokeStyle = hzColor(e.hz, nyq, (1 - f) * 0.8 * (0.4 + 0.6 * e.mag / maxMag)); cx.lineWidth = 1.5; cx.stroke(); }
+      }
+      strong.slice(0, 3).forEach((e) => { const p = uvToScreen((e.c + 0.5) / field.cols, (e.r + 0.5) / field.rows); const lbl = `${e.hz.toFixed(1)} Hz`; cx.font = '11px system-ui, sans-serif'; const w = cx.measureText(lbl).width + 8; cx.fillStyle = 'rgba(0,0,0,0.6)'; cx.fillRect(p.x + 8, p.y - 18, w, 15); cx.fillStyle = hzColor(e.hz, nyq, 1); cx.fillText(lbl, p.x + 12, p.y - 6); });
+    }
+    if ($('freqWaves').checked) {
+      const sp = flicker.spectrum();
+      if (sp) {
+        const peaks = sp.bins.filter((b, i, arr) => b.mag > 0.0025 && (i === 0 || b.mag >= arr[i - 1].mag) && (i === arr.length - 1 || b.mag >= arr[i + 1].mag)).sort((a, b) => b.mag - a.mag).slice(0, 3);
+        const maxMag = peaks[0]?.mag || 1; const y0 = c.h * 0.78;
+        peaks.forEach((b, i) => {
+          const lambda = Math.max(26, c.w / (3 + b.hz * 3)); const amp = 5 + 22 * (b.mag / maxMag); const yb = y0 + i * 26;
+          cx.beginPath(); for (let x = 0; x <= c.w; x += 3) { const y = yb + Math.sin((x / lambda) * 2 * Math.PI - now * b.hz * 2 * Math.PI) * amp; x ? cx.lineTo(x, y) : cx.moveTo(x, y); }
+          cx.strokeStyle = hzColor(b.hz, nyq, 0.85); cx.lineWidth = i === 0 ? 2 : 1.25; cx.stroke();
+          const lbl = `${b.hz.toFixed(1)} Hz · measured`; cx.font = '11px system-ui, sans-serif'; cx.fillStyle = 'rgba(0,0,0,0.6)'; cx.fillRect(14, yb - amp - 20, cx.measureText(lbl).width + 8, 15); cx.fillStyle = hzColor(b.hz, nyq, 1); cx.fillText(lbl, 18, yb - amp - 8);
+        });
+      }
+    }
+    const legend = `frequency seer · measured (optical) · ${res.fps.toFixed(0)} fps → ≤ ${nyq.toFixed(1)} Hz${res.dominant ? ` · dominant ${res.dominant.hz.toFixed(1)} Hz` : ' · no dominant oscillation'}`;
+    cx.font = '11px system-ui, sans-serif'; const lw = cx.measureText(legend).width + 10; cx.fillStyle = 'rgba(0,0,0,0.6)'; cx.fillRect(c.w - lw - 14, c.h - 58, lw, 18); cx.fillStyle = '#dfe9ff'; cx.fillText(legend, c.w - lw - 9, c.h - 45);
+    cx.restore();
   }
+  function updateFreqText() {
+    const res = field.result;
+    if (!res) { $('freqText').textContent = 'Collecting samples…'; return; }
+    const d = res.dominant;
+    $('freqText').textContent = `measured (optical): ${d ? `strongest oscillation ≈ ${d.hz.toFixed(1)} Hz at column ${d.c + 1}, row ${d.r + 1}` : 'no cell shows a dominant oscillation above noise'} · sampling ${res.fps.toFixed(1)} fps → Nyquist ${res.nyquist.toFixed(1)} Hz · ${res.samples} samples per cell.`;
+  }
+  for (const id of ['freqRipples', 'freqWaves', 'freqWave']) { $(id).checked = state.freq[id]; $(id).addEventListener('change', (e) => { state.freq[id] = e.target.checked; save(); }); }
 
   // ------------------------------------------------------------------ dock
   const PALETTES = ['none', 'thermal-sim', 'night-sim', 'mono'];
@@ -240,7 +284,8 @@ export function initPlatform(ctx) {
     dockAnalyze: () => { state.tools.analyze = !state.tools.analyze; save(); updateDock(); },
     dockRegion: () => { state.tools.region = !state.tools.region; if (!state.tools.region) { state.region = null; regionBox.hidden = true; } save(); updateDock(); },
     dockParticles: () => { state.tools.particles = !state.tools.particles; save(); updateDock(); },
-    dockFreq: () => openDrawer('freq'), dockHistory: () => openDrawer('history'),
+    dockFreq: () => { if (!on('intelligence', 'frequency')) return toast('Frequency seer is switched off in Settings.'); state.tools.freq = !state.tools.freq; save(); if (state.tools.freq) openDrawer('freq'); else if (drawer === 'freq') closeDrawer(); updateDock(); },
+    dockHistory: () => openDrawer('history'),
     dockWorkspace: () => openWorkspace(), dockScreen: () => openScreenRec(),
     dockPalette: () => { if (!on('presentation', 'palettes')) return toast('Palettes are switched off in Settings.'); state.palette = PALETTES[(PALETTES.indexOf(state.palette) + 1) % PALETTES.length]; save(); updateDock(); } };
   for (const [id, fn] of Object.entries(dockBtns)) $(id).addEventListener('click', fn);
@@ -250,7 +295,7 @@ export function initPlatform(ctx) {
     set('dockAnalyze', state.tools.analyze, on('intelligence', 'enabled') && on('intelligence', 'objects'));
     set('dockRegion', state.tools.region, on('intelligence', 'enabled') && on('intelligence', 'region'));
     set('dockParticles', state.tools.particles, on('intelligence', 'enabled') && on('intelligence', 'particles'));
-    set('dockFreq', drawer === 'freq', on('intelligence', 'enabled') && on('intelligence', 'frequency'));
+    set('dockFreq', state.tools.freq, on('intelligence', 'enabled') && on('intelligence', 'frequency'));
     set('dockHistory', drawer === 'history', on('observation', 'enabled') && on('observation', 'log'));
     set('dockWorkspace', !$('workspace').hidden, on('device', 'enabled') && on('device', 'multiCamera'));
     set('dockScreen', !$('screenRec').hidden || screenRec.active, on('recording', 'enabled') && on('recording', 'screen') && on('device', 'screenSource'));
@@ -386,7 +431,7 @@ export function initPlatform(ctx) {
     if (!featureOn(f, 'intelligence', 'region')) { state.tools.region = false; }
     if (!featureOn(f, 'device', 'multiCamera') && !wsPanel.hidden) { wsPanel.hidden = true; }
     if (!featureOn(f, 'recording', 'screen') && !srPanel.hidden && !screenRec.active) srPanel.hidden = true;
-    if (!featureOn(f, 'intelligence', 'frequency') && drawer === 'freq') closeDrawer();
+    if (!featureOn(f, 'intelligence', 'frequency')) { state.tools.freq = false; if (drawer === 'freq') closeDrawer(); }
     if (!featureOn(f, 'observation', 'log') && drawer === 'history') closeDrawer();
     save(); updateDock();
   }

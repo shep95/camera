@@ -59,12 +59,19 @@ supported, visualize what is inferred, never confuse a visualization with a dire
 | **Optical intelligence (non-AI)** | frame differencing with a running background model, global camera-motion compensation, connected components, constant-velocity tracking with predict/lost/reacquire/release states, deterministic attention score `S = wm·M + wc·C + wp·P + wt·T − wn·N`, trajectory overlay, region monitoring, event clips | tracks *changes*, it does not name objects; pixel motion is not metres per second |
 | **Adaptive focus** | rounded, draggable magnification windows that follow a tracked target (auto-opened above the attention threshold, or opened by clicking the image), with stabilization, pinning and a frozen "last observed" view when the target is lost | magnification enlarges captured pixels only; it cannot reveal detail the sensor never recorded |
 | **Particle view** | enhances and traces small bright transient features over time | a visualization of optical signals, not a particle count and not a composition |
-| **Frequency seer** | brightness-over-time spectrum of the camera signal, labelled *measured*; an optional wave animation labelled *illustrative* | limited to half the frame rate; a visible-light camera does not measure radio-frequency fields; no external sensor is connected |
+| **Frequency seer** | drawn over the image, not as a graph: ripples where brightness oscillates (ring rate = measured Hz, colour = frequency) and wave lines for the dominant frequencies, labelled *measured*; an optional interference pattern labelled *illustrative* | limited to half the frame rate; a visible-light camera does not measure radio-frequency fields; no external sensor is connected |
 | **Observation system** | timeline of acquired / lost / reacquired / region / manual events with the *original* observed crop, session-only memory or private IndexedDB history with retention and delete; export is explicit and file-based | never writes to your photo folders on its own |
 | **Workspace** | up to four sources (cameras, the primary feed, a screen) in one grid on a shared clock, drag to reorder, maximize, per-tile record choice, synchronized and/or independent recording | starting streams together is not frame-level sync; timestamps are shown on the composed recording |
 | **Screen recorder** | the desktop is a first-class source: screen, window or tab, camera overlay as a composited layer (shape, size, opacity, drag with corner snapping), microphone and system audio mixed, pause/resume, WebM export | cursor highlighting and keystroke display are not exposed to web pages |
 | **Palettes** | thermal-style, night-style and mono visualizations | always labelled **simulated**; never a temperature measurement |
 | **Computational low-light** | extra gain and denoising in dark scenes | software only, not night vision |
+
+**Speed and heat.** A performance controller watches the frame time and moves between Full, Balanced
+and Eco tiers (preview resolution and analysis cadence), locked while recording; photos are always
+captured at native resolution. The eye button or `H` hides panels, and hidden panels stop their
+drawing work (mode thumbnails, preset thumbnails, focus windows, the ambient background), so a
+minimal layout costs less power. Focus windows live in a rail beside the viewfinder, never over it,
+and the ambient background cross-fades on a fixed period with a fixed orientation.
 
 Every feature has its own switch under its domain in **Settings → Features by domain**, and each
 domain has a master switch. Face identification is not implemented and its switch cannot be turned on.

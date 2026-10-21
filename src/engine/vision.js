@@ -24,7 +24,7 @@ export class MotionAnalyzer {
     for (let i = 0, p = 0; i < L.length; i++, p += 4) { const y = (0.2126 * data[p] + 0.7152 * data[p + 1] + 0.0722 * data[p + 2]) / 255; L[i] = y; sum += y; }
     const luma = sum / L.length;
     this.frames++;
-    if (!this.prev) { this.prev = L; this.bg = Float32Array.from(L); return { blobs: [], particles: [], motion: 0, shift: { dx: 0, dy: 0 }, luma }; }
+    if (!this.prev) { this.prev = L; this.bg = Float32Array.from(L); return { blobs: [], particles: [], motion: 0, shift: { dx: 0, dy: 0 }, luma, L, W: AW, H: AH }; }
 
     // --- camera-motion compensation: global integer shift that best aligns previous and current frame
     const shift = estimateShift(this.prev, L, AW, AH, 3);
@@ -60,7 +60,7 @@ export class MotionAnalyzer {
       }
     }
     this.prev = L;
-    return { blobs, particles, motion: motionPix / L.length, shift: { dx: shift.dx / AW, dy: shift.dy / AH }, luma, threshold: thr, noise: this.noise };
+    return { blobs, particles, motion: motionPix / L.length, shift: { dx: shift.dx / AW, dy: shift.dy / AH }, luma, threshold: thr, noise: this.noise, L, W: AW, H: AH };
   }
 }
 
@@ -176,5 +176,51 @@ export class FlickerAnalyzer {
     }
     let peak = bins[0]; for (const b of bins) if (b.mag > peak.mag) peak = b;
     return { bins, peak, fps, nyquist: fps / 2, samples: n };
+  }
+}
+
+/**
+ * Spatial flicker field: a coarse grid of brightness histories so the frequency seer can show
+ * WHERE in the image a brightness oscillation occurs, and at what rate. Each cell gets a DFT over
+ * the last N samples. Measured, limited to half the sampling rate; mains flicker aliases.
+ */
+export class FlickerField {
+  constructor(cols = 16, rows = 9, n = 64) {
+    this.cols = cols; this.rows = rows; this.n = n; this.cells = cols * rows;
+    this.buf = new Float32Array(this.cells * n); this.head = 0; this.count = 0; this.times = new Float64Array(n);
+    this.result = null;
+  }
+  /** Push one analysis frame (luma array W×H) at time t (ms). */
+  push(L, W, H, t) {
+    const cw = W / this.cols, ch = H / this.rows; const idx = this.head;
+    for (let r = 0; r < this.rows; r++) for (let c = 0; c < this.cols; c++) {
+      let s = 0, n = 0; const x0 = Math.floor(c * cw), x1 = Math.floor((c + 1) * cw), y0 = Math.floor(r * ch), y1 = Math.floor((r + 1) * ch);
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { s += L[y * W + x]; n++; }
+      this.buf[(r * this.cols + c) * this.n + idx] = n ? s / n : 0;
+    }
+    this.times[idx] = t; this.head = (idx + 1) % this.n; if (this.count < this.n) this.count++;
+  }
+  /** Compute dominant oscillation per cell. Returns { cells:[{c,r,hz,mag,phase}], fps, nyquist, dominant }. */
+  compute() {
+    const n = this.count; if (n < 24) return null;
+    const order = []; for (let i = 0; i < n; i++) order.push((this.head - n + i + this.n) % this.n);
+    const dur = (this.times[order[n - 1]] - this.times[order[0]]) / 1000; const fps = (n - 1) / Math.max(dur, 1e-3);
+    const half = n >> 1; const cos = [], sin = [];
+    for (let k = 1; k < half; k++) { const ck = new Float32Array(n), sk = new Float32Array(n); for (let i = 0; i < n; i++) { const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1)); const a = (2 * Math.PI * k * i) / n; ck[i] = Math.cos(a) * w; sk[i] = Math.sin(a) * w; } cos.push(ck); sin.push(sk); }
+    const cells = []; let dominant = null;
+    for (let cell = 0; cell < this.cells; cell++) {
+      const base = cell * this.n; let mean = 0; for (let i = 0; i < n; i++) mean += this.buf[base + order[i]]; mean /= n;
+      let bestK = 0, bestM = 0, bestPh = 0, total = 0;
+      for (let k = 1; k < half; k++) {
+        let re = 0, im = 0; const ck = cos[k - 1], sk = sin[k - 1];
+        for (let i = 0; i < n; i++) { const x = this.buf[base + order[i]] - mean; re += x * ck[i]; im -= x * sk[i]; }
+        const m = Math.hypot(re, im) / n; total += m; if (m > bestM) { bestM = m; bestK = k; bestPh = Math.atan2(im, re); }
+      }
+      const snr = total > 0 ? bestM / (total / (half - 1)) : 0; // how much the peak stands out from the rest
+      const e = { c: cell % this.cols, r: (cell / this.cols) | 0, hz: (bestK * fps) / n, mag: bestM, phase: bestPh, snr };
+      cells.push(e); if (bestM > 0.003 && snr > 2.5 && (!dominant || bestM > dominant.mag)) dominant = e;
+    }
+    this.result = { cells, fps, nyquist: fps / 2, samples: n, dominant };
+    return this.result;
   }
 }

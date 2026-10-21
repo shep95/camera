@@ -29,14 +29,15 @@ export function sharpnessOf(ctx, source, w, h) {
  * @param renderFrame  function that renders the next live frame into `canvas`
  */
 export function captureBurst(canvas, renderFrame, frames = 6) {
-  const out = document.createElement('canvas'); out.width = canvas.width; out.height = canvas.height;
+  const out = document.createElement('canvas'); // sized after the first full-resolution render
   const octx = out.getContext('2d');
   const small = document.createElement('canvas'); small.width = 160; small.height = 90;
   const sctx = small.getContext('2d', { willReadFrequently: true });
-  let best = -1, taken = 0;
+  let best = -1, taken = 0, sized = false;
   return new Promise((resolve) => {
     const step = () => {
       renderFrame();
+      if (!sized) { sized = true; out.width = canvas.width; out.height = canvas.height; }
       const s = sharpnessOf(sctx, canvas, small.width, small.height);
       if (s > best) { best = s; octx.drawImage(canvas, 0, 0); }
       if (++taken >= frames) resolve({ canvas: out, sharpness: best, frames: taken });

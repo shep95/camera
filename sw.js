@@ -1,10 +1,10 @@
 // Service worker: makes True Vision Camera work offline after the first visit.
 // Everything the app needs is first-party and precached; there are no network calls at runtime.
-const VERSION = 'tv-v2';
+const VERSION = 'tv-v3';
 const SHELL = ['/', '/index.html', '/styles.css', '/manifest.webmanifest', '/assets/icon.svg',
   '/src/app.js', '/src/engine/scene.js', '/src/engine/decision.js', '/src/engine/aura.js',
   '/src/engine/renderer.js', '/src/engine/capture.js', '/src/engine/principles.js', '/src/platform.js', '/src/features.js',
-  '/src/engine/vision.js', '/src/engine/focus.js', '/src/engine/observations.js', '/src/engine/devices.js', '/src/engine/screenrec.js', '/src/engine/workspace.js'];
+  '/src/engine/vision.js', '/src/engine/focus.js', '/src/engine/observations.js', '/src/engine/devices.js', '/src/engine/screenrec.js', '/src/engine/workspace.js', '/src/engine/perf.js'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

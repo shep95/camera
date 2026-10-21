@@ -78,3 +78,27 @@ test('device modality is guessed from the name and marked unverified', () => {
   const c = summarizeCaps({ width: { min: 1, max: 1920 }, frameRate: { min: 1, max: 30 }, zoom: {}, deviceId: 'x' });
   assert.equal(c.width, '1–1920'); assert.deepEqual(c.controls, ['zoom']);
 });
+
+test('flicker field localises a 4 Hz oscillation to one cell', async () => {
+  const { FlickerField } = await import('../src/engine/vision.js');
+  const W = 32, H = 18, f = new FlickerField(16, 9, 64);
+  for (let i = 0; i < 64; i++) {
+    const L = new Float32Array(W * H).fill(0.5); const v = 0.5 + 0.2 * Math.sin(2 * Math.PI * 4 * (i / 30));
+    for (let y = 2; y < 4; y++) for (let x = 20; x < 22; x++) L[y * W + x] = v; // cells (10,1)
+    f.push(L, W, H, i * (1000 / 30));
+  }
+  const r = f.compute();
+  assert.ok(r.dominant, 'a dominant cell'); assert.equal(r.dominant.c, 10); assert.equal(r.dominant.r, 1);
+  assert.ok(Math.abs(r.dominant.hz - 4) < 0.5, `hz ${r.dominant.hz}`); assert.ok(r.dominant.snr > 2.5);
+});
+
+test('performance controller steps down under load and back up when cool, never while locked', async () => {
+  const { PerfController } = await import('../src/engine/perf.js');
+  const p = new PerfController({ start: 'full', hold: 1000 });
+  for (let i = 0; i < 60; i++) p.tick(40, 2000 + i * 10); assert.equal(p.tier, 'balanced', 'one step down per hold period');
+  for (let i = 0; i < 60; i++) p.tick(40, 4000 + i * 10); assert.equal(p.tier, 'eco');
+  p.locked = true; for (let i = 0; i < 60; i++) p.tick(8, 6000 + i * 10); assert.equal(p.tier, 'eco', 'locked while recording');
+  p.locked = false; for (let i = 0; i < 60; i++) p.tick(8, 8000 + i * 10); assert.equal(p.tier, 'balanced');
+  assert.deepEqual(p.renderSize(3840, 2160), [1920, 1080]); assert.deepEqual(p.renderSize(1280, 720), [1280, 720]);
+  p.set('full'); for (let i = 0; i < 60; i++) p.tick(50, 400 + i); assert.equal(p.tier, 'full', 'manual tier is not overridden');
+});

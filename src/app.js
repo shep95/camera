@@ -6,6 +6,7 @@ import { Renderer, smoothParams } from './engine/renderer.js';
 import { captureBurst, saveBlob, canvasToBlob, makeFilename, Recorder } from './engine/capture.js';
 import { GROUPS } from './engine/principles.js';
 import { initPlatform } from './platform.js';
+import { PerfController, TIERS } from './engine/perf.js';
 import { defaultFeatures, sanitizeFeatures, featureOn } from './features.js';
 
 const $ = (id) => document.getElementById(id);
@@ -20,8 +21,10 @@ const DEFAULTS = {
   weights: { ...DEFAULT_WEIGHTS }, theme: 'dark', thirds: false, deviceId: null,
   features: defaultFeatures(),
   focus: { zoom: 4, follow: true, stabilize: true, auto: true, threshold: 0.45 },
-  tools: { analyze: false, region: false, particles: false },
-  region: null, palette: 'none', obsMode: 'session', obsRetention: 7,
+  tools: { analyze: false, region: false, particles: false, freq: false },
+  freq: { freqRipples: true, freqWaves: true, freqWave: false },
+  region: null, palette: 'none', obsMode: 'session', obsRetention: 7, perfTier: 'auto',
+  hidden: { modes: false, panel: false, rail: false, ambient: false, overlay: false },
 };
 
 /** Only accept known keys with the expected types from storage (never trust persisted data blindly). */
@@ -50,9 +53,12 @@ function sanitize(raw) {
   }
   s.features = sanitizeFeatures(raw.features);
   if (raw.focus && typeof raw.focus === 'object') { s.focus.zoom = num(raw.focus.zoom, 1.5, 12) ?? 4; for (const k of ['follow', 'stabilize', 'auto']) s.focus[k] = bool(raw.focus[k]) ?? s.focus[k]; s.focus.threshold = num(raw.focus.threshold, 0.1, 0.9) ?? 0.45; }
-  if (raw.tools && typeof raw.tools === 'object') for (const k of ['analyze', 'region', 'particles']) s.tools[k] = bool(raw.tools[k]) ?? false;
+  if (raw.tools && typeof raw.tools === 'object') for (const k of ['analyze', 'region', 'particles', 'freq']) s.tools[k] = bool(raw.tools[k]) ?? false;
+  if (raw.freq && typeof raw.freq === 'object') for (const k of Object.keys(s.freq)) s.freq[k] = bool(raw.freq[k]) ?? s.freq[k];
   if (raw.region && typeof raw.region === 'object') { const r = { x: num(raw.region.x, 0, 1), y: num(raw.region.y, 0, 1), w: num(raw.region.w, 0, 1), h: num(raw.region.h, 0, 1) }; s.region = Object.values(r).every((v) => v != null) ? r : null; }
   s.palette = str(raw.palette, ['none', 'thermal-sim', 'night-sim', 'mono']) ?? 'none';
+  if (raw.hidden && typeof raw.hidden === 'object') for (const k of Object.keys(s.hidden)) s.hidden[k] = bool(raw.hidden[k]) ?? false;
+  s.perfTier = str(raw.perfTier, ['auto', 'full', 'balanced', 'eco']) ?? 'auto';
   s.obsMode = str(raw.obsMode, ['session', 'private']) ?? 'session'; s.obsRetention = num(raw.obsRetention, 1, 30) ?? 7;
   return s;
 }
@@ -66,9 +72,12 @@ const shutter = $('shutter'), recBadge = $('recBadge'), recTime = $('recTime'), 
 const lastImg = $('lastImg'), lastShot = $('lastShot');
 const modeThumbs = [...document.querySelectorAll('[data-thumb]')].map((c) => ({ c, ctx: c.getContext('2d'), kind: c.dataset.thumb }));
 const presetThumbs = [...document.querySelectorAll('[data-pthumb]')].map((c) => ({ c, ctx: c.getContext('2d'), kind: c.dataset.pthumb }));
-const ambient = $('ambient'); ambient.width = 32; ambient.height = 18; const ambCtx = ambient.getContext('2d');
+const ambA = $('ambient'), ambB = $('ambient2'); for (const c of [ambA, ambB]) { c.width = 32; c.height = 18; }
+const ambCtx = [ambA.getContext('2d'), ambB.getContext('2d')]; let ambFront = 0, ambLast = 0;
+const AMB_PERIOD = 1600; document.documentElement.style.setProperty('--amb-period', `${AMB_PERIOD}ms`);
+const perf = new PerfController({ start: 'balanced' });
 
-let renderer, analyzer, platform, stream = null, raf = 0, scene = null, smooth = null, decision = null, frameCount = 0, lastThumb = 0, compare = false, busy = false, lastUrl = null;
+let renderer, analyzer, platform, stream = null, raf = 0, scene = null, smooth = null, decision = null, frameCount = 0, lastThumb = 0, compare = false, busy = false, lastUrl = null, lastLoopT = 0;
 const recorder = new Recorder();
 
 // ---------------------------------------------------------------- helpers
@@ -133,8 +142,9 @@ async function populateDevices() {
 function renderFrame(t, forFile = false) {
   if (!stream || video.readyState < 2 || !video.videoWidth) return false;
   const W = video.videoWidth, H = video.videoHeight;
-  renderer.resize(W, H);
-  if (frameCount++ % 3 === 0) scene = analyzer.analyze(video, W / H);
+  const [rw, rh] = forFile ? [W, H] : perf.renderSize(W, H);
+  renderer.resize(rw, rh);
+  if (frameCount++ % perf.cfg.analysisStride === 0) scene = analyzer.analyze(video, W / H);
   decision = decide(scene, ctl(), cfg());
   const procOff = !featureOn(state.features, 'processing', 'enabled');
   const target = compare || procOff ? { ...neutralParams(decision.params.mirror, W / H), palette: decision.params.palette } : decision.params;
@@ -147,11 +157,16 @@ function renderFrame(t, forFile = false) {
 function loop(t) {
   raf = requestAnimationFrame(loop);
   if (busy) return;
+  if (lastLoopT) { perf.locked = recorder.active || platform.busy(); if (perf.tick(t - lastLoopT, t)) console.info(`Performance tier → ${perf.cfg.label}`); }
+  lastLoopT = t;
   if (!renderFrame(t)) return;
   updateGuide();
   if (recorder.active) { const s = Math.floor(recorder.elapsed); recTime.textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; }
   platform.frame(t);
-  if (t - lastThumb > 400) { lastThumb = t; drawThumbs(); drawAmbient(); updateAuraReport(); }
+  if (t - lastThumb > perf.cfg.thumbMs) { lastThumb = t; drawThumbs(); }
+  if (t - ambLast >= AMB_PERIOD) { ambLast = t; drawAmbient(); }
+  updateAccent();
+  if (!state.hidden.panel && frameCount % 10 === 0) updateAuraReport();
 }
 
 function updateGuide() {
@@ -179,27 +194,43 @@ function drawCover(ctx, c, mirror, filter) {
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height); ctx.restore();
 }
 function drawThumbs() {
-  for (const t of modeThumbs) drawCover(t.ctx, t.c, t.kind === 'mirror', THUMB_FILTERS[t.kind]);
-  for (const t of presetThumbs) drawCover(t.ctx, t.c, previewMirror(), THUMB_FILTERS[t.kind]);
+  if (!state.hidden.modes) for (const t of modeThumbs) drawCover(t.ctx, t.c, t.kind === 'mirror', THUMB_FILTERS[t.kind]);
+  if (!state.hidden.panel) for (const t of presetThumbs) drawCover(t.ctx, t.c, previewMirror(), THUMB_FILTERS[t.kind]);
 }
+const HIDEABLE = ['modes', 'panel', 'rail', 'ambient', 'overlay'];
+function applyHidden() {
+  for (const k of HIDEABLE) document.body.classList.toggle(`hide-${k}`, !!state.hidden[k]);
+  const any = HIDEABLE.some((k) => state.hidden[k]);
+  $('hideBtn').classList.toggle('on', any); $('hideBtn').title = any ? 'Show all panels (H)' : 'Hide panels (H). Hidden panels stop drawing, which saves power and heat.';
+  save();
+}
+function toggleMinimal() { const any = HIDEABLE.some((k) => state.hidden[k]); for (const k of HIDEABLE) state.hidden[k] = !any; applyHidden(); }
 function drawAmbient() {
-  drawCover(ambCtx, ambient, previewMirror());
-  if (!scene || !featureOn(state.features, 'presentation', 'ambient')) return;
+  // Draw the next sample into the back buffer, then swap: the CSS cross-fade lasts exactly one
+  // sampling period, so the background glides continuously instead of jumping. Orientation is
+  // fixed (never mirrored) so switching modes does not flip the room behind the interface.
+  if (!featureOn(state.features, 'presentation', 'ambient') || state.hidden.ambient) return;
+  const back = 1 - ambFront; const c = back ? ambB : ambA;
+  drawCover(ambCtx[back], c, false);
+  (back ? ambB : ambA).classList.add('front'); (back ? ambA : ambB).classList.remove('front'); ambFront = back;
+}
+function updateAccent() {
+  if (!scene || !featureOn(state.features, 'presentation', 'ambient') || state.hidden.ambient) return;
   // Adopt the scene's colour into the UI: one hue + one chroma drive the whole oklch token scale.
   const [r, g, b] = scene.mean; const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
   let h = 80; // house gold when the scene is neutral
   if (d > 0.02) { h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h = (h * 60 + 360) % 360; }
   const sat = mx > 0 ? d / mx : 0;
-  // keep chroma restrained (calm register): neutral scenes stay gold, saturated scenes tint the UI gently
   const chroma = 0.06 + Math.min(sat, 0.6) * 0.1;
-  const blend = Math.min(1, sat * 2.5); // how far from gold the hue moves
-  let dh = ((h - 80 + 540) % 360) - 180; const hue = (80 + dh * blend + 360) % 360;
-  hueSmooth = hueSmooth == null ? hue : hueSmooth + (((hue - hueSmooth + 540) % 360) - 180) * 0.1;
-  chromaSmooth = chromaSmooth == null ? chroma : chromaSmooth + (chroma - chromaSmooth) * 0.1;
+  const blend = Math.min(1, sat * 2.5);
+  const dh = ((h - 80 + 540) % 360) - 180; const hue = (80 + dh * blend + 360) % 360;
+  // slow exponential smoothing per frame (~2 s time constant at 60 fps): no sudden colour steps
+  hueSmooth = hueSmooth == null ? hue : hueSmooth + (((hue - hueSmooth + 540) % 360) - 180) * 0.01;
+  chromaSmooth = chromaSmooth == null ? chroma : chromaSmooth + (chroma - chromaSmooth) * 0.01;
+  if (frameCount % 6) return; // write CSS variables at ~10 Hz; transitions interpolate between writes
   const root = document.documentElement.style;
-  root.setProperty('--h', ((hueSmooth % 360) + 360) % 360);
+  root.setProperty('--h', (((hueSmooth % 360) + 360) % 360).toFixed(1));
   root.setProperty('--c', chromaSmooth.toFixed(3));
-  // sRGB companion for rgba() glows: an approximation of the accent at the current hue
   const acc = hslToRgb(hueSmooth, state.theme === 'light' ? 0.55 : 0.6, state.theme === 'light' ? 0.36 : 0.74);
   root.setProperty('--accent-rgb', acc.join(','));
 }
@@ -363,11 +394,23 @@ function initUI() {
     else if (e.key === 'v' || e.key === 'V') setCapture('video');
     else if (e.key === 'p' || e.key === 'P') setCapture('photo');
     else if (e.key === 'g' || e.key === 'G') $('frameBtn').click();
+    else if (e.key === 'h' || e.key === 'H') toggleMinimal();
     else if ((e.key === 'c' || e.key === 'C') && !e.repeat) setCompare(true);
   });
   document.addEventListener('keyup', (e) => { if (e.key === 'c' || e.key === 'C') setCompare(false); });
   window.addEventListener('pagehide', () => { if (recorder.active) recorder.end(); releaseMic(); stopStream(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && !recorder.active && !platform.busy()) { cancelAnimationFrame(raf); raf = 0; }
+    else if (!document.hidden && stream && !raf) { lastLoopT = 0; raf = requestAnimationFrame(loop); }
+  });
+  $('hideBtn').addEventListener('click', toggleMinimal);
+  document.querySelectorAll('[data-hide]').forEach((b) => b.addEventListener('click', () => { state.hidden[b.dataset.hide] = true; applyHidden(); }));
+  applyHidden();
+  $('perfTier').value = state.perfTier; applyPerf();
+  $('perfTier').addEventListener('change', (e) => { state.perfTier = e.target.value; save(); applyPerf(); });
 }
+
+function applyPerf() { if (state.perfTier === 'auto') perf.setAuto(); else perf.set(state.perfTier); }
 
 async function learnFromFiles(files) {
   const c = document.createElement('canvas'); c.width = 96; c.height = 54; const ctx = c.getContext('2d', { willReadFrequently: true });
@@ -391,6 +434,7 @@ function fillReport() {
   const rows = decision?.report || [{ label: 'Engine', value: 'waiting for camera', ref: '' }];
   for (const row of rows) { const d = document.createElement('div'); const a = document.createElement('span'); a.textContent = `${row.label}${row.ref ? ` · §${row.ref}` : ''}`; const b = document.createElement('span'); b.textContent = row.value; d.append(a, b); r.append(d); }
   if (decision?.aura?.notes?.length) { const d = document.createElement('div'); d.className = 'wide'; const a = document.createElement('span'); a.textContent = 'Adaptive Aura notes'; const b = document.createElement('span'); b.textContent = decision.aura.notes.join('; '); d.append(a, b); r.append(d); }
+  { const d = document.createElement('div'); d.className = 'wide'; const a = document.createElement('span'); a.textContent = 'Performance'; const b = document.createElement('span'); b.textContent = `${perf.cfg.label} tier${perf.auto ? ' (auto)' : ''} · ${perf.ema.toFixed(1)} ms/frame · preview ${view.width}×${view.height}`; d.append(a, b); r.append(d); }
   if (decision) { const d = document.createElement('div'); d.className = 'wide'; const a = document.createElement('span'); a.textContent = 'Priority weights'; const b = document.createElement('span'); b.textContent = Object.entries(decision.weights).map(([k, v]) => `${k} ${Math.round(v * 100)}%`).join(' · '); d.append(a, b); r.append(d); }
   const m = $('models'); m.textContent = '';
   for (const g of GROUPS) {
@@ -405,7 +449,7 @@ function fillReport() {
   try { renderer = new Renderer(view); } catch (e) { return status(`${e.message}\nTrue Vision needs WebGL to run its rendering pipeline.`); }
   analyzer = new SceneAnalyzer();
   initUI();
-  platform = initPlatform({ state, save, video, view, viewfinder, status, flashBadge, getSmooth: () => smooth, getScene: () => scene, previewMirror, getStream: () => stream });
+  platform = initPlatform({ state, save, video, view, viewfinder, status, flashBadge, getSmooth: () => smooth, getScene: () => scene, previewMirror, getStream: () => stream, getStride: () => perf.cfg.analysisStride, isHidden: (k) => !!state.hidden[k] });
   platform.applyFeatures();
   if (!window.isSecureContext) return status('Camera access needs a secure context.\nOpen this app over https:// or at http://localhost.');
   startCamera();
