@@ -19,7 +19,7 @@
   <div class="app" id="app">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-ring" aria-hidden="true"></span>
+        <span class="brand-ring" aria-hidden="true"><i></i></span>
         <div class="brand-text">
           <h1>TRUE VISION</h1>
           <p>SEE YOURSELF AS OTHERS DO</p>
@@ -39,7 +39,7 @@
     </header>
 
     <nav class="modes" id="modes" aria-label="Camera modes">
-      <button class="hide-x" data-hide="modes" type="button" title="Hide the mode list (stops its live thumbnails)">Hide</button>
+      <button class="hide-x" data-hide="modes" type="button" title="Hide the mode list (stops its live thumbnails)" aria-label="Hide the mode list (stops its live thumbnails)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 6.1A10 10 0 0 1 12 6c6.5 0 10 6 10 6a17 17 0 0 1-3.2 3.9M6.6 6.6A17 17 0 0 0 2 12s3.5 6 10 6a9.6 9.6 0 0 0 4.4-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></button>
       <button class="mode on" data-mode="natural" type="button">
         <canvas class="mode-thumb" width="96" height="112" data-thumb="natural"></canvas>
         <span class="mode-text"><strong>Natural</strong><small>See yourself as others do</small></span>
@@ -65,15 +65,21 @@
             <button class="on" data-cap="photo" role="tab" aria-selected="true" type="button">PHOTO</button>
             <button data-cap="video" role="tab" aria-selected="false" type="button">VIDEO</button>
           </div>
-          <label class="res">
-            <span class="sr-only">Resolution</span>
-            <select id="resSel">
-              <option value="720">HD</option>
-              <option value="1080">1080p</option>
-              <option value="2160" selected>4K</option>
-            </select>
-          </label>
+          <div class="vf-right">
+            <button class="timer-btn" id="timerBtn" type="button" title="Self-timer: place the camera, step back to a natural distance (T)" aria-label="Self-timer off">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/></svg><span id="timerVal">Off</span>
+            </button>
+            <label class="res">
+              <span class="sr-only">Resolution</span>
+              <select id="resSel">
+                <option value="720">HD</option>
+                <option value="1080">1080p</option>
+                <option value="2160" selected>4K</option>
+              </select>
+            </label>
+          </div>
         </div>
+        <div class="countdown" id="countdown" hidden aria-live="assertive"></div>
         <canvas id="view"></canvas>
         <canvas id="overlay" class="overlay" aria-hidden="true"></canvas>
         <div id="focusLayer" class="focus-layer"></div>
@@ -124,9 +130,10 @@
         <div class="rec-badge" id="recBadge" hidden><span class="dot"></span><span id="recTime">00:00</span></div>
         <div class="status" id="status">Starting camera…</div>
         <div class="flash" id="flash" aria-hidden="true"></div>
+        <div class="iris" id="iris" aria-hidden="true"></div>
       </section>
 
-      <aside class="focus-rail" id="focusRail" hidden aria-label="Focus windows"><button class="hide-x" data-hide="rail" type="button" title="Hide focus windows (stops their rendering)">Hide</button></aside>
+      <aside class="focus-rail" id="focusRail" hidden aria-label="Focus windows"><button class="hide-x" data-hide="rail" type="button" title="Hide focus windows (stops their rendering)" aria-label="Hide focus windows (stops their rendering)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 6.1A10 10 0 0 1 12 6c6.5 0 10 6 10 6a17 17 0 0 1-3.2 3.9M6.6 6.6A17 17 0 0 0 2 12s3.5 6 10 6a9.6 9.6 0 0 0 4.4-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></button></aside>
       <div class="controls">
         <button class="thumb" id="lastShot" type="button" title="Open last capture" aria-label="Open last capture">
           <img id="lastImg" alt="" hidden>
@@ -147,7 +154,7 @@
           <h2>True Vision</h2>
           <p id="modeSub">Natural Perspective</p>
         </div>
-        <button class="hide-x" data-hide="panel" type="button" title="Hide this panel (stops its live thumbnails)">Hide</button>
+        <button class="hide-x" data-hide="panel" type="button" title="Hide this panel (stops its live thumbnails)" aria-label="Hide this panel (stops its live thumbnails)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 6.1A10 10 0 0 1 12 6c6.5 0 10 6 10 6a17 17 0 0 1-3.2 3.9M6.6 6.6A17 17 0 0 0 2 12s3.5 6 10 6a9.6 9.6 0 0 0 4.4-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></button>
         <button class="icon-btn small" id="infoBtn" type="button" title="Engine report" aria-label="Engine report">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
         </button>
@@ -293,6 +300,13 @@
       </div>
     </div>
   </section>
+
+  <dialog id="viewer" class="viewer" aria-label="Last photo">
+    <form method="dialog" class="viewer-inner">
+      <img id="viewerImg" alt="Last captured photo">
+      <div class="viewer-bar"><span id="viewerCap" class="muted"></span><button type="submit" class="ghost sm">Close</button></div>
+    </form>
+  </dialog>
 
   <dialog id="settingsDlg" class="dlg">
     <form method="dialog">

@@ -25,6 +25,7 @@ const DEFAULTS = {
   freq: { freqRipples: true, freqWaves: true, freqWave: false },
   region: null, palette: 'none', obsMode: 'session', obsRetention: 7, perfTier: 'auto', photoFormat: 'png',
   hidden: { modes: false, panel: false, rail: false, ambient: false, overlay: false },
+  timer: 0,
 };
 
 /** Only accept known keys with the expected types from storage (never trust persisted data blindly). */
@@ -59,6 +60,7 @@ function sanitize(raw) {
   s.palette = str(raw.palette, ['none', 'thermal-sim', 'night-sim', 'mono']) ?? 'none';
   if (raw.hidden && typeof raw.hidden === 'object') for (const k of Object.keys(s.hidden)) s.hidden[k] = bool(raw.hidden[k]) ?? false;
   s.photoFormat = str(raw.photoFormat, ['png', 'jpeg']) ?? 'png';
+  s.timer = [0, 3, 10].includes(raw.timer) ? raw.timer : 0;
   s.perfTier = str(raw.perfTier, ['auto', 'full', 'balanced', 'eco']) ?? 'auto';
   s.obsMode = str(raw.obsMode, ['session', 'private']) ?? 'session'; s.obsRetention = num(raw.obsRetention, 1, 30) ?? 7;
   return s;
@@ -73,12 +75,18 @@ const shutter = $('shutter'), recBadge = $('recBadge'), recTime = $('recTime'), 
 const lastImg = $('lastImg'), lastShot = $('lastShot');
 const modeThumbs = [...document.querySelectorAll('[data-thumb]')].map((c) => ({ c, ctx: c.getContext('2d'), kind: c.dataset.thumb }));
 const presetThumbs = [...document.querySelectorAll('[data-pthumb]')].map((c) => ({ c, ctx: c.getContext('2d'), kind: c.dataset.pthumb }));
-const ambA = $('ambient'), ambB = $('ambient2'); for (const c of [ambA, ambB]) { c.width = 32; c.height = 18; }
-const ambCtx = [ambA.getContext('2d'), ambB.getContext('2d')]; let ambFront = 0, ambLast = 0;
+// Ambient: blurred in JavaScript on a 96×54 buffer, then upscaled by the browser. No CSS filter, so
+// the compositor only blends two textures during the cross-fade instead of re-running a 70 px blur
+// on two full-screen layers every frame.
+const AMB_W = 96, AMB_H = 54;
+const ambA = $('ambient'), ambB = $('ambient2'); for (const c of [ambA, ambB]) { c.width = AMB_W; c.height = AMB_H; }
+const ambCtx = [ambA.getContext('2d', { willReadFrequently: true }), ambB.getContext('2d', { willReadFrequently: true })]; let ambFront = 0, ambLast = 0;
+// One small shared frame feeds every thumbnail: one scaled read of the camera instead of eight.
+const thumbSrc = document.createElement('canvas'); thumbSrc.width = 240; thumbSrc.height = 135; const thumbCtx = thumbSrc.getContext('2d');
 const AMB_PERIOD = 1600; document.documentElement.style.setProperty('--amb-period', `${AMB_PERIOD}ms`);
 const perf = new PerfController({ start: 'balanced' });
 
-let renderer, analyzer, platform, stream = null, raf = 0, scene = null, smooth = null, decision = null, frameCount = 0, lastThumb = 0, compare = false, busy = false, lastUrl = null, lastLoopT = 0;
+let renderer, analyzer, platform, stream = null, raf = 0, vfc = 0, running = false, lastPresented = 0, lastCbAt = 0, guideText = '', distText = '', recText = '', scene = null, smooth = null, decision = null, frameCount = 0, lastThumb = 0, compare = false, busy = false, lastUrl = null, lastLoopT = 0;
 const recorder = new Recorder();
 
 // ---------------------------------------------------------------- helpers
@@ -100,7 +108,35 @@ function resDims(r) { return r >= 2160 ? [3840, 2160] : r >= 1080 ? [1920, 1080]
 function previewMirror() { return MODES[state.mode].mirror || (state.mirrorPreviewOnly && !recorder.active); }
 
 // ---------------------------------------------------------------- camera
-function stopStream() { if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; } cancelAnimationFrame(raf); raf = 0; }
+function stopStream() { if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; } stopLoop(); }
+/** Render on real camera frames (requestVideoFrameCallback) so the GPU does no work between frames;
+ *  a display-refresh loop is the fallback. A watchdog switches to the fallback if callbacks stall. */
+const useVfc = typeof HTMLVideoElement !== 'undefined' && 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+function startLoop() {
+  if (running) return; running = true; lastLoopT = 0; lastPresented = 0; lastCbAt = performance.now();
+  if (useVfc) vfc = video.requestVideoFrameCallback(onVideoFrame); else raf = requestAnimationFrame(loop);
+}
+function stopLoop() {
+  running = false;
+  if (vfc && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(vfc); vfc = 0;
+  cancelAnimationFrame(raf); raf = 0;
+}
+function onVideoFrame(now, meta) {
+  if (!running) return;
+  vfc = video.requestVideoFrameCallback(onVideoFrame);
+  lastCbAt = performance.now();
+  if (raf) { cancelAnimationFrame(raf); raf = 0; } // callbacks recovered after a watchdog fallback
+  const skipped = lastPresented && meta?.presentedFrames ? Math.max(0, meta.presentedFrames - lastPresented - 1) : 0;
+  lastPresented = meta?.presentedFrames || 0;
+  if (busy) return;
+  const t0 = performance.now();
+  frameWork(now);
+  perf.locked = recorder.active || platform.busy();
+  if (perf.tickLoad(performance.now() - t0, skipped, now)) console.info(`Performance tier → ${perf.cfg.label}`);
+}
+setInterval(() => { // watchdog: callbacks stopped while the camera is live → fall back to rAF
+  if (useVfc && running && !raf && stream && !document.hidden && performance.now() - lastCbAt > 1500) { raf = requestAnimationFrame(loop); console.info('Frame callbacks stalled; using display refresh'); }
+}, 1000);
 
 async function startCamera() {
   stopStream();
@@ -128,7 +164,7 @@ async function startCamera() {
   platform.onStream(stream);
   status(null);
   smooth = null; frameCount = 0;
-  if (!raf) raf = requestAnimationFrame(loop);
+  startLoop();
 }
 
 /** Browsers often answer an "ideal" request with a modest stream; ask for the device's real maximum (bounded by the chosen resolution). */
@@ -170,16 +206,20 @@ function renderFrame(t, forFile = false) {
 }
 
 function loop(t) {
+  if (!running) { raf = 0; return; }
   raf = requestAnimationFrame(loop);
   if (busy) return;
   if (lastLoopT) { perf.locked = recorder.active || platform.busy(); if (perf.tick(t - lastLoopT, t)) console.info(`Performance tier → ${perf.cfg.label}`); }
   lastLoopT = t;
+  frameWork(t);
+}
+function frameWork(t) {
   if (!renderFrame(t)) return;
   updateGuide();
-  if (recorder.active) { const s = Math.floor(recorder.elapsed); recTime.textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; }
+  if (recorder.active) { const sec = Math.floor(recorder.elapsed); const txt = `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`; if (txt !== recText) { recText = txt; recTime.textContent = txt; } }
   platform.frame(t);
   if (t - lastThumb > perf.cfg.thumbMs) { lastThumb = t; drawThumbs(); }
-  if (t - ambLast >= AMB_PERIOD) { ambLast = t; drawAmbient(); }
+  if (t - ambLast >= AMB_PERIOD) { ambLast = t; drawAmbient(); writeAccent(); }
   updateAccent();
   if (!state.hidden.panel && frameCount % 10 === 0) updateAuraReport();
 }
@@ -188,9 +228,10 @@ function updateGuide() {
   if (guideEl.dataset.hold) return; // a capture note is showing
   const adv = distanceAdvice(decision?.distance ?? null, state.distTarget);
   const hasFace = !!(scene?.face && scene.face.conf > 0.15);
-  guideEl.textContent = '';
-  const pill = document.createElement('span'); pill.className = `pill ${adv.cls}`; pill.textContent = adv.text; guideEl.append(pill);
-  $('distHint').textContent = hasFace && decision?.distance ? adv.text : 'Recommended for natural proportions';
+  const key = `${adv.cls}|${adv.text}`;
+  if (key !== guideText) { guideText = key; guideEl.textContent = ''; const pill = document.createElement('span'); pill.className = `pill ${adv.cls}`; pill.textContent = adv.text; guideEl.append(pill); }
+  const hint = hasFace && decision?.distance ? adv.text : 'Recommended for natural proportions';
+  if (hint !== distText) { distText = hint; $('distHint').textContent = hint; }
   if (state.thirds && hasFace && smooth && featureOn(state.features, 'presentation', 'faceBox')) {
     const r = viewfinder.getBoundingClientRect(); const A = video.videoWidth / video.videoHeight, B = r.width / r.height;
     const dw = A > B ? r.height * A : r.width, dh = A > B ? r.height : r.width / A; const ox = (r.width - dw) / 2, oy = (r.height - dh) / 2;
@@ -203,15 +244,17 @@ function updateGuide() {
 }
 
 const THUMB_FILTERS = { natural: 'none', mirror: 'none', cinematic: 'contrast(1.15) saturate(0.9) sepia(0.12)', portrait: 'contrast(1.05) brightness(1.04)', soft: 'blur(0.6px) contrast(0.95)', studio: 'brightness(1.1) contrast(1.06) sepia(0.05)', film: 'sepia(0.25) contrast(1.08) saturate(0.85)' };
-function drawCover(ctx, c, mirror, filter) {
-  const vw = video.videoWidth, vh = video.videoHeight; if (!vw) return;
+function drawCover(ctx, c, mirror, filter, src = video) {
+  const vw = src.videoWidth || src.width, vh = src.videoHeight || src.height; if (!vw) return;
   const s = Math.max(c.width / vw, c.height / vh); const sw = c.width / s, sh = c.height / s; const sx = (vw - sw) / 2, sy = (vh - sh) / 2;
   ctx.save(); ctx.filter = filter || 'none'; if (mirror) { ctx.translate(c.width, 0); ctx.scale(-1, 1); }
-  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height); ctx.restore();
+  ctx.drawImage(src, sx, sy, sw, sh, 0, 0, c.width, c.height); ctx.restore();
 }
 function drawThumbs() {
-  if (!state.hidden.modes) for (const t of modeThumbs) drawCover(t.ctx, t.c, t.kind === 'mirror', THUMB_FILTERS[t.kind]);
-  if (!state.hidden.panel) for (const t of presetThumbs) drawCover(t.ctx, t.c, previewMirror(), THUMB_FILTERS[t.kind]);
+  const modes = !state.hidden.modes, presets = !state.hidden.panel; if (!modes && !presets) return;
+  thumbCtx.drawImage(video, 0, 0, thumbSrc.width, thumbSrc.height); // one read of the camera frame
+  if (modes) for (const t of modeThumbs) drawCover(t.ctx, t.c, t.kind === 'mirror', THUMB_FILTERS[t.kind], thumbSrc);
+  if (presets) for (const t of presetThumbs) drawCover(t.ctx, t.c, previewMirror(), THUMB_FILTERS[t.kind], thumbSrc);
 }
 const HIDEABLE = ['modes', 'panel', 'rail', 'ambient', 'overlay'];
 function applyHidden() {
@@ -226,9 +269,31 @@ function drawAmbient() {
   // sampling period, so the background glides continuously instead of jumping. Orientation is
   // fixed (never mirrored) so switching modes does not flip the room behind the interface.
   if (!featureOn(state.features, 'presentation', 'ambient') || state.hidden.ambient) return;
-  const back = 1 - ambFront; const c = back ? ambB : ambA;
-  drawCover(ambCtx[back], c, false);
+  const back = 1 - ambFront; const c = back ? ambB : ambA, x = ambCtx[back];
+  drawCover(x, c, false);
+  const img = x.getImageData(0, 0, AMB_W, AMB_H); blurAmbient(img.data, AMB_W, AMB_H, state.theme === 'light'); x.putImageData(img, 0, 0);
   (back ? ambB : ambA).classList.add('front'); (back ? ambA : ambB).classList.remove('front'); ambFront = back;
+}
+/** Three-pass separable box blur (≈ Gaussian) plus the tone treatment that CSS filters used to do. */
+const blurTmp = new Float32Array(AMB_W * AMB_H * 3), blurTmp2 = new Float32Array(AMB_W * AMB_H * 3);
+function blurAmbient(d, W, H, light) {
+  const a = blurTmp, b = blurTmp2, R = 5;
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) { a[i * 3] = d[p]; a[i * 3 + 1] = d[p + 1]; a[i * 3 + 2] = d[p + 2]; }
+  for (let pass = 0; pass < 3; pass++) {
+    for (let y = 0; y < H; y++) for (let ch = 0; ch < 3; ch++) { // horizontal a → b
+      let acc = 0; for (let k = -R; k <= R; k++) acc += a[(y * W + Math.min(W - 1, Math.max(0, k))) * 3 + ch];
+      for (let x = 0; x < W; x++) { b[(y * W + x) * 3 + ch] = acc / (2 * R + 1); acc += a[(y * W + Math.min(W - 1, x + R + 1)) * 3 + ch] - a[(y * W + Math.max(0, x - R)) * 3 + ch]; }
+    }
+    for (let x = 0; x < W; x++) for (let ch = 0; ch < 3; ch++) { // vertical b → a
+      let acc = 0; for (let k = -R; k <= R; k++) acc += b[(Math.min(H - 1, Math.max(0, k)) * W + x) * 3 + ch];
+      for (let y = 0; y < H; y++) { a[(y * W + x) * 3 + ch] = acc / (2 * R + 1); acc += b[(Math.min(H - 1, y + R + 1) * W + x) * 3 + ch] - b[(Math.max(0, y - R) * W + x) * 3 + ch]; }
+    }
+  }
+  const bright = light ? 1.45 : 0.5, sat = light ? 0.85 : 1.25;
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) {
+    const r = a[i * 3], g = a[i * 3 + 1], bl = a[i * 3 + 2], l = 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+    d[p] = Math.min(255, (l + (r - l) * sat) * bright); d[p + 1] = Math.min(255, (l + (g - l) * sat) * bright); d[p + 2] = Math.min(255, (l + (bl - l) * sat) * bright);
+  }
 }
 function updateAccent() {
   if (!scene || !featureOn(state.features, 'presentation', 'ambient') || state.hidden.ambient) return;
@@ -237,17 +302,22 @@ function updateAccent() {
   let h = 80; // house gold when the scene is neutral
   if (d > 0.02) { h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h = (h * 60 + 360) % 360; }
   const sat = mx > 0 ? d / mx : 0;
-  const chroma = 0.06 + Math.min(sat, 0.6) * 0.1;
-  const blend = Math.min(1, sat * 2.5);
-  const dh = ((h - 80 + 540) % 360) - 180; const hue = (80 + dh * blend + 360) % 360;
-  // slow exponential smoothing per frame (~2 s time constant at 60 fps): no sudden colour steps
-  hueSmooth = hueSmooth == null ? hue : hueSmooth + (((hue - hueSmooth + 540) % 360) - 180) * 0.01;
-  chromaSmooth = chromaSmooth == null ? chroma : chromaSmooth + (chroma - chromaSmooth) * 0.01;
-  if (frameCount % 6) return; // write CSS variables at ~10 Hz; transitions interpolate between writes
+  // The scene tints the accent, but only inside a champagne-gold band (hue 62–92, low chroma):
+  // metallic warmth reads as quality; a red or green scene must not turn the controls pink or lime.
+  const dh = ((h - 78 + 540) % 360) - 180; const hue = 78 + Math.max(-16, Math.min(14, dh * Math.min(1, sat * 2)));
+  const chroma = 0.07 + Math.min(sat, 0.5) * 0.06;
+  hueSmooth = hueSmooth == null ? hue : hueSmooth + (hue - hueSmooth) * 0.02;
+  chromaSmooth = chromaSmooth == null ? chroma : chromaSmooth + (chroma - chromaSmooth) * 0.02;
+}
+/** Write the accent once per ambient period, and only when it moved enough to see. */
+let accentWritten = null;
+function writeAccent() {
+  if (hueSmooth == null || (accentWritten && Math.abs(accentWritten[0] - hueSmooth) < 1.5 && Math.abs(accentWritten[1] - chromaSmooth) < 0.004)) return;
+  accentWritten = [hueSmooth, chromaSmooth];
   const root = document.documentElement.style;
-  root.setProperty('--h', (((hueSmooth % 360) + 360) % 360).toFixed(1));
+  root.setProperty('--ha', hueSmooth.toFixed(1));
   root.setProperty('--c', chromaSmooth.toFixed(3));
-  const acc = hslToRgb(hueSmooth, state.theme === 'light' ? 0.55 : 0.6, state.theme === 'light' ? 0.36 : 0.74);
+  const acc = hslToRgb(hueSmooth, state.theme === 'light' ? 0.5 : 0.55, state.theme === 'light' ? 0.38 : 0.76);
   root.setProperty('--accent-rgb', acc.join(','));
 }
 let hueSmooth = null, chromaSmooth = null;
@@ -291,6 +361,7 @@ async function captureStill() {
 async function takePhoto() {
   if (busy || !stream || !featureOn(state.features, 'recording', 'photo')) return;
   busy = true; shutter.disabled = true;
+  const iris = $('iris'); iris.classList.remove('go'); void iris.offsetWidth; iris.classList.add('go');
   try {
     const now = performance.now();
     const shot = (await captureStill()) || (await captureBurst(view, () => renderFrame(performance.now(), true), 6));
@@ -301,6 +372,8 @@ async function takePhoto() {
     saveBlob(blob, name);
     if (lastUrl) URL.revokeObjectURL(lastUrl);
     lastUrl = URL.createObjectURL(blob); lastImg.src = lastUrl; lastImg.hidden = false; lastShot.dataset.name = name;
+    lastShot.classList.remove('pop'); void lastShot.offsetWidth; lastShot.classList.add('pop');
+    try { navigator.vibrate?.(12); } catch { /* no haptics */ }
     if (state.saveRef) {
       const ref = document.createElement('canvas'); ref.width = video.videoWidth; ref.height = video.videoHeight;
       ref.getContext('2d').drawImage(video, 0, 0);
@@ -308,12 +381,21 @@ async function takePhoto() {
     }
     const info = `Saved ${shot.width}×${shot.height} · ${shot.source === 'still' ? 'full-resolution still' : `best of ${shot.frames} frames`} · ${(blob.size / 1048576).toFixed(1)} MB`;
     console.info(`${name}: ${info} in ${(performance.now() - now).toFixed(0)} ms`);
+    lastShot.dataset.info = `${name} · ${info.replace('Saved ', '')}`;
     showNote(info);
   } catch (e) { status(`Could not save the photo: ${e.message}`, { retry: false }); setTimeout(() => status(null), 3000); }
   finally { busy = false; shutter.disabled = false; }
 }
-let noteTimer = 0;
-function showNote(text) { const g = guideEl; g.textContent = ''; const pill = document.createElement('span'); pill.className = 'pill ok'; pill.textContent = text; g.append(pill); g.dataset.hold = '1'; clearTimeout(noteTimer); noteTimer = setTimeout(() => { delete g.dataset.hold; }, 2600); }
+let noteTimer = 0, countdownTimer = 0;
+/** Self-timer: visible countdown on the viewfinder; the shutter (or Escape) cancels it. */
+function startCountdown(sec, done) {
+  const el = $('countdown'); let left = sec; el.hidden = false;
+  const show = () => { el.textContent = ''; const n = document.createElement('span'); n.textContent = String(left); el.append(n); };
+  show(); shutter.classList.add('counting');
+  countdownTimer = setInterval(() => { left--; if (left > 0) show(); else { cancelCountdown(); done(); } }, 1000);
+}
+function cancelCountdown() { clearInterval(countdownTimer); countdownTimer = 0; $('countdown').hidden = true; shutter.classList.remove('counting'); }
+function showNote(text) { const g = guideEl; guideText = ''; g.textContent = ''; const pill = document.createElement('span'); pill.className = 'pill ok'; pill.textContent = text; g.append(pill); g.dataset.hold = '1'; clearTimeout(noteTimer); noteTimer = setTimeout(() => { delete g.dataset.hold; }, 2600); }
 
 let micStream = null, recStarting = false;
 /** Open the microphone once and keep it ready so recording starts instantly and never loses audio. */
@@ -387,8 +469,16 @@ function initUI() {
     const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput'); if (devs.length < 2) return;
     const i = devs.findIndex((d) => d.deviceId === state.deviceId); state.deviceId = devs[(i + 1) % devs.length].deviceId; save(); startCamera();
   });
-  shutter.addEventListener('click', () => (state.capture === 'video' ? toggleRecording() : takePhoto()));
-  lastShot.addEventListener('click', () => { if (lastUrl) window.open(lastUrl, '_blank', 'noopener'); });
+  shutter.addEventListener('click', () => {
+    if (countdownTimer) return cancelCountdown();               // a second press cancels the self-timer
+    if (state.capture === 'video' && recorder.active) return toggleRecording();
+    if (state.timer) return startCountdown(state.timer, () => (state.capture === 'video' ? toggleRecording() : takePhoto()));
+    return state.capture === 'video' ? toggleRecording() : takePhoto();
+  });
+  lastShot.addEventListener('click', () => { if (!lastUrl) return; $('viewerImg').src = lastUrl; $('viewerCap').textContent = lastShot.dataset.info || lastShot.dataset.name || ''; $('viewer').showModal(); });
+  const timerUi = () => { $('timerVal').textContent = state.timer ? `${state.timer}s` : 'Off'; $('timerBtn').classList.toggle('on', !!state.timer); $('timerBtn').setAttribute('aria-label', state.timer ? `Self-timer ${state.timer} seconds` : 'Self-timer off'); };
+  $('timerBtn').addEventListener('click', () => { state.timer = state.timer === 0 ? 3 : state.timer === 3 ? 10 : 0; save(); timerUi(); });
+  timerUi();
 
   bindRange('focal', 'focal', (v) => `${v} mm`, 'focalVal');
   $('focal').addEventListener('input', () => { $('focalHint').textContent = state.focal < 35 ? 'Natural perspective (less distortion)' : state.focal < 60 ? 'Classic portrait rendering' : 'Compressed, flattering telephoto look'; });
@@ -438,14 +528,24 @@ function initUI() {
     else if (e.key === 'p' || e.key === 'P') setCapture('photo');
     else if (e.key === 'g' || e.key === 'G') $('frameBtn').click();
     else if (e.key === 'h' || e.key === 'H') toggleMinimal();
+    else if (e.key === 't' || e.key === 'T') $('timerBtn').click();
+    else if (e.key === 'Escape' && countdownTimer) cancelCountdown();
     else if ((e.key === 'c' || e.key === 'C') && !e.repeat) setCompare(true);
   });
   document.addEventListener('keyup', (e) => { if (e.key === 'c' || e.key === 'C') setCompare(false); });
   window.addEventListener('pagehide', () => { if (recorder.active) recorder.end(); releaseMic(); stopStream(); });
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && !recorder.active && !platform.busy()) { cancelAnimationFrame(raf); raf = 0; }
-    else if (!document.hidden && stream && !raf) { lastLoopT = 0; raf = requestAnimationFrame(loop); }
+    if (document.hidden && !recorder.active && !platform.busy()) stopLoop();
+    else if (!document.hidden && stream) startLoop();
   });
+  // Immersive view: viewfinder chrome recedes after a few seconds without input; any input brings it back.
+  let idleTimer = 0;
+  const canIdle = () => !document.querySelector('dialog[open]') && $('drawer').hidden && $('workspace').hidden && $('screenRec').hidden
+    && statusEl.hidden && !document.activeElement?.closest?.('.vf-top, .dock') && !viewfinder.matches('.region-mode');
+  const goIdle = () => { if (canIdle()) document.body.classList.add('idle'); else idleTimer = setTimeout(goIdle, 1500); };
+  const wake = () => { if (document.body.classList.contains('idle')) document.body.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(goIdle, 2800); };
+  for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart', 'focusin']) document.addEventListener(ev, wake, { passive: true });
+  wake();
   $('hideBtn').addEventListener('click', toggleMinimal);
   document.querySelectorAll('[data-hide]').forEach((b) => b.addEventListener('click', () => { state.hidden[b.dataset.hide] = true; applyHidden(); }));
   applyHidden();

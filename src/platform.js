@@ -29,13 +29,18 @@ export function initPlatform(ctx) {
   const winEls = new Map();
 
   // ------------------------------------------------------------------ geometry helpers
+  // viewfinder size is observed, not measured per call: getBoundingClientRect in a per-point helper
+  // forced a layout read for every trajectory point on every frame
+  let vfW = viewfinder.clientWidth || 1, vfH = viewfinder.clientHeight || 1, overlayDirty = true;
+  new ResizeObserver((entries) => { const b = entries[0].contentRect; vfW = b.width || 1; vfH = b.height || 1; overlayDirty = true; }).observe(viewfinder);
   function coverRect() {
-    const r = viewfinder.getBoundingClientRect(); const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+    const r = { width: vfW, height: vfH }; const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
     const A = vw / vh, B = r.width / r.height; const dw = A > B ? r.height * A : r.width, dh = A > B ? r.height : r.width / A;
     return { ox: (r.width - dw) / 2, oy: (r.height - dh) / 2, dw, dh, w: r.width, h: r.height };
   }
+  let frameRect = null; // one cover rect per frame, shared by every overlay point
   function uvToScreen(x, y) {
-    const c = coverRect(); const z = ctx.getSmooth()?.zoom || 1; let fx = 0.5 + (x - 0.5) * z, fy = 0.5 + (y - 0.5) * z; if (ctx.previewMirror()) fx = 1 - fx;
+    const c = frameRect || coverRect(); const z = ctx.getSmooth()?.zoom || 1; let fx = 0.5 + (x - 0.5) * z, fy = 0.5 + (y - 0.5) * z; if (ctx.previewMirror()) fx = 1 - fx;
     return { x: c.ox + fx * c.dw, y: c.oy + fy * c.dh, sx: c.dw * z, sy: c.dh * z };
   }
   function screenToUv(px, py) {
@@ -64,7 +69,14 @@ export function initPlatform(ctx) {
       if (on('intelligence', 'region') && state.region) checkRegion(t);
     }
     if (intel && on('intelligence', 'autoFocus')) {
-      focus.set({ auto: state.focus.auto, follow: state.focus.follow, stabilize: state.focus.stabilize, zoom: state.focus.zoom, threshold: state.focus.threshold });
+      // never auto-magnify the subject's own face: it is already the centre of the view, and a
+      // swaying head would otherwise open windows constantly. Manual clicks can still focus on it.
+      const face = ctx.getScene?.()?.face;
+      // and require real travel: a lamp flickering in place changes brightness, which frame
+      // differencing sees as "motion", but nothing is moving
+      const travelled = (t) => { const h = t.history; if (h.length < 6) return 0; let mx = 0; for (const q of h) mx = Math.max(mx, Math.hypot(q.x - h[0].x, q.y - h[0].y)); return mx; };
+      const exclude = (t) => travelled(t) < 0.04 || (face && face.conf > 0.2 && Math.abs(t.x - face.x) < face.w * 0.85 && Math.abs(t.y - face.y) < face.h * 0.95);
+      focus.set({ auto: state.focus.auto, follow: state.focus.follow, stabilize: state.focus.stabilize, zoom: state.focus.zoom, threshold: state.focus.threshold, exclude });
       const events = focus.update(tracks, performance.now());
       for (const e of events) onFocusEvent(e);
     } else if (focus.windows.length) { focus.closeAll(); }
@@ -97,10 +109,12 @@ export function initPlatform(ctx) {
 
   // ------------------------------------------------------------------ overlay drawing
   function drawOverlay() {
-    const c = coverRect(); const dpr = Math.min(devicePixelRatio || 1, 2); const W = Math.round(c.w * dpr), H = Math.round(c.h * dpr);
+    const c = coverRect(); frameRect = c; const dpr = Math.min(devicePixelRatio || 1, 2); const W = Math.round(c.w * dpr), H = Math.round(c.h * dpr);
+    const want = on('presentation', 'enabled') && on('presentation', 'overlays') && on('intelligence', 'enabled') && !ctx.isHidden?.('overlay')
+      && ((state.tools.freq && on('intelligence', 'frequency')) || (state.tools.analyze && on('intelligence', 'objects')) || (state.tools.particles && on('intelligence', 'particles')) || focus.windows.length > 0);
+    if (!want) { if (overlayDirty) { octx.setTransform(1, 0, 0, 1, 0, 0); octx.clearRect(0, 0, overlay.width, overlay.height); overlayDirty = false; } frameRect = null; return; }
     if (overlay.width !== W || overlay.height !== H) { overlay.width = W; overlay.height = H; }
-    octx.setTransform(dpr, 0, 0, dpr, 0, 0); octx.clearRect(0, 0, c.w, c.h);
-    if (!on('presentation', 'enabled') || !on('presentation', 'overlays') || !on('intelligence', 'enabled') || ctx.isHidden?.('overlay')) return;
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0); octx.clearRect(0, 0, c.w, c.h); overlayDirty = true;
     if (state.tools.freq && on('intelligence', 'frequency')) drawFrequency(c);
     const showTracks = state.tools.analyze && on('intelligence', 'objects');
     if (showTracks) for (const tr of tracks) {
@@ -310,6 +324,7 @@ export function initPlatform(ctx) {
 
   // click to focus / drag to draw region
   viewfinder.addEventListener('pointerdown', (e) => {
+    if (document.body.classList.contains('idle')) return; // the first tap on a faded view only wakes the controls
     if (e.target.closest('button, select, .drawer, .focus-win, .dock, .vf-top')) return;
     const r = viewfinder.getBoundingClientRect(); const px = e.clientX - r.left, py = e.clientY - r.top;
     if (state.tools.region && on('intelligence', 'region')) { regionDraw = { x0: px, y0: py }; viewfinder.setPointerCapture(e.pointerId); return; }

@@ -102,3 +102,11 @@ test('performance controller steps down under load and back up when cool, never 
   assert.deepEqual(p.renderSize(3840, 2160), [1920, 1080]); assert.deepEqual(p.renderSize(1280, 720), [1280, 720]);
   p.set('full'); for (let i = 0; i < 60; i++) p.tick(50, 400 + i); assert.equal(p.tier, 'full', 'manual tier is not overridden');
 });
+
+test('camera-paced load metric: work time and skipped frames drive the tier, not the camera interval', async () => {
+  const { PerfController } = await import('../src/engine/perf.js');
+  const p = new PerfController({ start: 'balanced', hold: 1000 });
+  for (let i = 0; i < 80; i++) p.tickLoad(3, 0, 2000 + i * 33); assert.equal(p.tier, 'full', 'light work at 30 fps steps up');
+  for (let i = 0; i < 25; i++) p.tickLoad(4, 1, 5000 + i * 33); assert.equal(p.tier, 'balanced', 'skipped frames step down');
+  for (let i = 0; i < 80; i++) p.tickLoad(20, 0, 8000 + i * 33); assert.equal(p.tier, 'eco', 'heavy main-thread work steps down');
+});

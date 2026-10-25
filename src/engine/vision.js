@@ -84,9 +84,14 @@ export function shiftImage(img, W, H, dx, dy) {
 }
 
 /** 4-connected components of a binary mask; returns bbox, pixel count and summed contrast weight. */
+let ccSeen = null, ccStack = null;
 export function components(mask, W, H, minPx = 4, weight = null) {
-  const seen = new Uint8Array(mask.length); const out = []; const stack = new Int32Array(mask.length);
-  for (let s = 0; s < mask.length; s++) {
+  // buffers are reused across calls and neighbours are visited inline: this runs every analysed
+  // frame, and the old version allocated an array per pixel
+  const n = mask.length;
+  if (!ccSeen || ccSeen.length !== n) { ccSeen = new Uint8Array(n); ccStack = new Int32Array(n); } else ccSeen.fill(0);
+  const seen = ccSeen, stack = ccStack, out = [];
+  for (let s = 0; s < n; s++) {
     if (!mask[s] || seen[s]) continue;
     let sp = 0; stack[sp++] = s; seen[s] = 1;
     const c = { minX: W, maxX: 0, minY: H, maxY: 0, n: 0, sum: 0 };
@@ -94,9 +99,10 @@ export function components(mask, W, H, minPx = 4, weight = null) {
       const i = stack[--sp]; const x = i % W, y = (i / W) | 0;
       c.n++; c.sum += weight ? weight[i] : 1;
       if (x < c.minX) c.minX = x; if (x > c.maxX) c.maxX = x; if (y < c.minY) c.minY = y; if (y > c.maxY) c.maxY = y;
-      const nb = [i - 1, i + 1, i - W, i + W];
-      if (x === 0) nb[0] = -1; if (x === W - 1) nb[1] = -1;
-      for (const j of nb) if (j >= 0 && j < mask.length && mask[j] && !seen[j]) { seen[j] = 1; stack[sp++] = j; }
+      if (x > 0 && mask[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; stack[sp++] = i - 1; }
+      if (x < W - 1 && mask[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; stack[sp++] = i + 1; }
+      if (y > 0 && mask[i - W] && !seen[i - W]) { seen[i - W] = 1; stack[sp++] = i - W; }
+      if (y < H - 1 && mask[i + W] && !seen[i + W]) { seen[i + W] = 1; stack[sp++] = i + W; }
     }
     if (c.n >= minPx) out.push(c);
   }

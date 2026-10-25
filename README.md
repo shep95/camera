@@ -24,13 +24,14 @@ After the first visit the service worker caches the app, so it keeps working wit
 
 | limitation of ordinary cameras | what True Vision does |
 | --- | --- |
+| face finding in warm light | the most face-like *connected* skin region, cut along brightness edges, so a lamp-lit wall cannot merge with the face and break the distance estimate |
 | mirrored vs. unmirrored face | **Natural** (unmirrored, how others see you) and **Mirror** modes, with a true preview; optional mirror-preview-only while the file stays true |
 | facial distortion | face distance estimated from the pinhole model; **Depth Mapping** re-projects a too-close viewpoint toward a natural observer distance, mildly, locally and reversibly |
 | missing depth | face-local perspective correction + depth cues (vignette, separation) in Cinematic/Portrait |
 | unnatural skin and colours | grey-world white balance (colour constancy) and **True Color** skin-chroma calibration |
 | excessive sharpening | **Natural Processing** keeps real texture; micro-contrast is reduced automatically when noise rises |
 | frozen expressions | the shutter captures a 6-frame burst and keeps the sharpest (Laplacian variance) |
-| lighting mismatch | exposure targeted on the face, highlight protection, gentle highlight shoulder, filmic tone only when asked |
+| lighting mismatch | exposure metered 60% face and 40% scene around middle grey (so skin tones are not forced to one brightness), applied in linear light, with highlight protection; filmic contrast only in the mids and highlights so shadow detail is kept |
 
 Stills are captured at the camera's full photo resolution through the ImageCapture API where the
 browser offers it (falling back to a six-frame burst from the stream), rendered with 16-tap bicubic
@@ -72,7 +73,19 @@ supported, visualize what is inferred, never confuse a visualization with a dire
 | **Palettes** | thermal-style, night-style and mono visualizations | always labelled **simulated**; never a temperature measurement |
 | **Computational low-light** | extra gain and denoising in dark scenes | software only, not night vision |
 
-**Speed and heat.** A performance controller watches the frame time and moves between Full, Balanced
+**Premium feel, with a reason for each choice.** The accent is a champagne-gold metal that the scene can
+nudge only within a narrow warm band, so the controls never turn pink or lime. The shutter and brand mark
+are brushed-metal bezels. After a few seconds without input the viewfinder chrome fades away and your
+image fills the stage; any movement brings it back, and on touch the first tap only wakes the controls.
+Each photo gets a short iris-and-flash ritual, the thumbnail springs into place with a ring of light, and
+phones give a brief haptic tick. The thumbnail opens an in-app viewer with the saved size. A 3 s or 10 s
+self-timer (`T`) lets you place the camera and step back to a natural viewing distance.
+
+**Speed and heat.** Rendering runs on real camera frames (`requestVideoFrameCallback`), so the GPU does no work between
+frames on a 60 or 120 Hz display. The ambient background is blurred once per sample in JavaScript
+instead of by a CSS filter re-run every frame, panels no longer use backdrop blur, and the DOM is only
+written when text actually changes. A performance controller watches per-frame work and skipped frames
+and moves between Full, Balanced
 and Eco tiers (preview resolution and analysis cadence), locked while recording; photos are always
 captured at native resolution. The eye button or `H` hides panels, and hidden panels stop their
 drawing work (mode thumbnails, preset thumbnails, focus windows, the ambient background), so a

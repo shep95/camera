@@ -36,7 +36,7 @@ export class AdaptiveFocus {
     if (o.auto) {
       const open = new Set(this.windows.map((w) => w.trackId));
       const autoCount = this.windows.filter((w) => !w.manual).length;
-      const cands = tracks.filter((t) => t.hits >= 6 && t.misses === 0 && t.score >= o.threshold && !open.has(t.id)).sort((a, b) => b.score - a.score);
+      const cands = tracks.filter((t) => t.hits >= 6 && t.misses === 0 && t.score >= o.threshold && !open.has(t.id) && !(o.exclude && o.exclude(t))).sort((a, b) => b.score - a.score);
       for (const t of cands) {
         if (this.windows.filter((w) => !w.manual).length >= o.maxAuto) break;
         const w = this.open({ trackId: t.id, cx: t.x, cy: t.y, manual: false }); w.targetW = t.w; w.targetH = t.h;

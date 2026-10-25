@@ -62,7 +62,10 @@ void main(){
   col *= u_wb * u_exposure;
   col.r *= 1.0 + u_warmth; col.b *= 1.0 - u_warmth;
   col = col / (1.0 + u_highlightSoft * max(col - 0.7, 0.0));
-  vec3 toned = mix(rolloff(col), aces(col), u_filmic);
+  // filmic contrast in the mids and highlights only: ACES has a toe slope of ~0.21, which crushes
+  // shadow detail (hair, dark clothes, the room). Below the pivot the response stays linear.
+  float wf = u_filmic * smoothstep(0.015, 0.18, luma(col));
+  vec3 toned = mix(rolloff(col), aces(col), wf);
   vec3 s = toSrgb(toned);
 
   // --- skin weight (YCbCr box) used to protect skin from stylistic shifts

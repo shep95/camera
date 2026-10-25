@@ -33,6 +33,19 @@ test('scene analysis finds a skin-coloured face and estimates distance', () => {
   assert.equal(s.clipHi, 0);
 });
 
+test('face detection ignores warm background glow that also passes the skin test', () => {
+  const W = 96, H = 54;
+  const data = frame(W, H, (x, y) => {
+    if (((x - 48) / 9) ** 2 + ((y - 25) / 12) ** 2 < 1) return [200, 150, 120];        // face
+    const g = Math.exp(-(((x - 86) / 7) ** 2 + ((y - 28) / 14) ** 2));                   // lamp falloff
+    return [Math.round(18 + 90 * g), Math.round(13 + 55 * g), Math.round(9 + 25 * g)];
+  });
+  const s = analyzePixels(data, W, H, null);
+  assert.ok(s.face, 'face found');
+  assert.ok(Math.abs(s.face.x - 0.5) < 0.05, `face x ${s.face.x}`);
+  assert.ok(s.face.w < 0.3, `face width ${s.face.w} not inflated by the glow`);
+});
+
 test('grey world white balance corrects a blue cast', () => {
   const s = analyzePixels(frame(16, 9, () => [80, 100, 160]), 16, 9, null);
   assert.ok(s.wb[2] < s.wb[0] && s.wb[2] < s.wb[1], 'blue gain reduced');

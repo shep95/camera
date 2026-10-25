@@ -25,6 +25,21 @@ export class PerfController {
     if (this.ema < this.raiseAt && i > 0) { this.tier = ORDER[i - 1]; this.lastSwitch = now; return true; }
     return false;
   }
+  /**
+   * Camera-paced variant: the interval between callbacks is the camera's frame period, not a load
+   * signal. Load = main-thread work per frame plus frames the browser had to skip because the GPU or
+   * main thread fell behind. Steps down when either is sustained, up when both are comfortably low.
+   */
+  tickLoad(workMs, skipped, now) {
+    if (!Number.isFinite(workMs) || workMs < 0) return false;
+    this.ema = this.ema * 0.9 + Math.min(workMs, 200) * 0.1;
+    this.skipEma = (this.skipEma ?? 0) * 0.9 + Math.min(skipped || 0, 5) * 0.1;
+    if (!this.auto || this.locked || now - this.lastSwitch < this.hold) return false;
+    const i = ORDER.indexOf(this.tier);
+    if ((this.ema > 12 || this.skipEma > 0.35) && i < ORDER.length - 1) { this.tier = ORDER[i + 1]; this.lastSwitch = now; return true; }
+    if (this.ema < 5 && this.skipEma < 0.05 && i > 0) { this.tier = ORDER[i - 1]; this.lastSwitch = now; return true; }
+    return false;
+  }
   set(tier) { if (TIERS[tier]) { this.tier = tier; this.auto = false; } }
   setAuto() { this.auto = true; }
   /** Preview render size for a source of W×H under the current tier. */

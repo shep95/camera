@@ -74,19 +74,24 @@ export function decide(scene, ctl, cfg) {
 
   // --- Exposure model (31–45) + perception (61–63, 73–74) ----------------------------------------
   if (scene) {
-    const target = scene.face ? 0.42 : 0.40;
-    const cur = Math.max(scene.face ? scene.faceLuma : scene.luma, 0.02);
-    let e = clamp(target / cur, 0.7, 1.6);
+    // Meter in display (sRGB-encoded) values: middle grey = 0.46. With a face, meter 60% face and
+    // 40% scene so the subject is well exposed without forcing every skin tone to one brightness
+    // (that would lighten dark skin and darken light skin, which falsifies how people look).
+    const meter = Math.max(scene.face ? 0.6 * scene.faceLuma + 0.4 * scene.luma : scene.luma, 0.02);
+    let e = clamp(0.46 / meter, 0.85, 1.35);
     // Weber/Fechner: perceptual error grows with log ratio, so pull toward 1 as perception weight falls
     e = 1 + (e - 1) * clamp(wp / 0.3, 0.4, 1.2);
+    if (e < 1 && scene.face && scene.faceLuma < 0.75) e = Math.max(e, 0.97); // never dull a face that is not near clipping
     if (scene.clipHi > 0.01) e = Math.min(e, 1);            // protect highlights (dynamic range)
-    if (scene.clipHi > 0.03) e *= 0.93;
+    if (scene.clipHi > 0.03) e *= 0.95;
     // gain amplifies shot and read noise; the quality weight says how much that matters
     const noise = clamp(scene.noise, 0, 1);
     if (e > 1) e = 1 + (e - 1) * (1 - 0.6 * noise * clamp(wq / 0.2, 0.5, 1.5));
+    // the renderer applies gain in LINEAR light: convert the display-space ratio (gamma 2.2)
+    e = e ** 2.2;
     if (!expo) e = 1;
     p.exposure = e * (preset.exposure || 1);
-    if (ctl.lowLight && scene.luma < 0.3) { p.exposure = clamp(p.exposure * (0.35 / Math.max(scene.luma, 0.05)), 1, 2.6); add('Computational low-light', `${p.exposure.toFixed(2)}× gain, denoised (software, not night vision)`, '36–40'); }
+    if (ctl.lowLight && scene.luma < 0.3) { p.exposure = clamp(p.exposure * (0.38 / Math.max(scene.luma, 0.05)) ** 2.2, 1, 4); add('Computational low-light', `${p.exposure.toFixed(2)}× gain, denoised (software, not night vision)`, '36–40'); }
     add('Exposure gain', `${p.exposure.toFixed(2)}×`, '31, 36–40, 61–62');
     add('Highlight clipping', `${(scene.clipHi * 100).toFixed(1)}%`, '37');
     add('Noise level', `${(noise * 100).toFixed(0)}%`, '38–40');
